@@ -1,0 +1,41 @@
+# Build output
+build/
+build-*/
+out/
+cmake-build-*/
+
+# CMake generated files (in case of in-source or nested configure)
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+# vcpkg
+vcpkg_installed/
+
+# Compiled binaries / objects
+*.o
+*.obj
+*.so
+*.so.*
+*.dylib
+*.a
+*.exe
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
