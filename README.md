@@ -6,8 +6,8 @@ result set, masks it before anything is returned, and records an audit entry for
 
 Written in C++17. Developed on Linux.
 
-This commit contains the service skeleton — configuration, logging, and a health endpoint. The
-pipeline stages described below are not implemented yet.
+The service currently exposes only the health endpoint. The core now includes a tested SQL analysis
+component; it is not connected to the HTTP service yet.
 
 ## Planned request pipeline
 
@@ -21,6 +21,15 @@ HTTP request
   → audit             (record the outcome)
   → HTTP response
 ```
+
+## SQL analysis
+
+`SqlAnalyzer` converts structured parser output into a parser-independent `SqlAnalysis`. It records
+the statement type and class, statement count, referenced tables, projection columns, wildcard and
+computed-projection flags, and features it could not model.
+
+The analyzer depends on the `ISqlParser` interface rather than a specific parser library. No parser
+adapter is included yet, so the unit tests use a hand-written fake.
 
 ## Prerequisites
 

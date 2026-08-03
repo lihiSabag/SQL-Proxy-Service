@@ -35,12 +35,16 @@ target_link_libraries(sql_proxy_service
 
 add_executable(sql_proxy_unit_tests
     tests/core/server_config_test.cpp
+    tests/core/sql_analyzer_test.cpp
     src/config/server_config.cpp
+    src/core/sql_analysis.cpp
+    src/core/sql_analyzer.cpp
 )
 
 target_include_directories(sql_proxy_unit_tests
     PRIVATE
         src
+        tests/fakes
 )
 
 target_link_libraries(sql_proxy_unit_tests
