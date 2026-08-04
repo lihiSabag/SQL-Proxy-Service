@@ -1,741 +1,335 @@
 # SQL Proxy Service
 
-A SQL proxy that sits between callers and PostgreSQL. It receives SQL statements over a small REST
-API, analyzes them, enforces a read-only access policy, executes the statements it allows, classifies
-PII in the result set, masks it before anything is returned, and records an audit entry for every
-request it processes.
+A security-focused SQL proxy for PostgreSQL.
 
-Written in C++17 and built with CMake and vcpkg. Runs natively on Linux or through Docker Compose.
+The service receives SQL statements, analyzes them before execution, applies a fail-closed access policy, executes approved queries, classifies sensitive result columns, masks PII, and writes structured audit records.
 
-## Quick start with Docker Compose
+The implementation prioritizes four goals:
 
-Brings up PostgreSQL (schema and seed data applied automatically) and the service. No local
-toolchain, no database setup, no `.env` needed.
+- Make security decisions explicit and predictable.
+- Reject SQL that cannot be analyzed safely.
+- Keep business logic independent from infrastructure libraries.
+- Minimize sensitive data exposure throughout the pipeline.
+
+## Assignment coverage
+
+| Evaluation area | Implementation |
+|---|---|
+| SQL Analysis | AST-based parsing with `hyrise/sql-parser`, followed by a parser-independent analysis model. |
+| Correctness of SQL Analysis | Unsupported, unparseable, or ambiguous SQL is rejected instead of being partially interpreted. |
+| Masking Enforcement | Masking is centralized, deterministic, and applied before results leave the service. |
+| Classification Logic | Query analysis is combined with actual result-column metadata. Unknown attribution is kept separate from non-PII. |
+| Audit Quality | Query outcomes are stored as structured JSON Lines records without SQL text, values, identifiers, or driver error messages. |
+| System Log | Startup, configuration, server lifecycle, and audit persistence failures are logged separately from the audit trail. |
+| Data Setup | Docker Compose initializes PostgreSQL from version-controlled schema and seed scripts. |
+| Overall Design | Core logic is separated from HTTP, SQL parser, PostgreSQL, and file-persistence details through project-owned interfaces. |
+
+## Architecture
+
+![SQL Proxy Service Architecture](architecture.png)
+
+`ProxyService` coordinates the request flow. Each stage has one responsibility:
+
+| Component | Responsibility |
+|---|---|
+| `SqlAnalyzer` | Converts parser output into the project's SQL analysis model. |
+| `PolicyEngine` | Decides whether the analyzed statement may execute. |
+| `IQueryExecutor` | Defines the database-neutral execution contract. |
+| `DataClassifier` | Attributes result columns and identifies PII categories. |
+| `PiiMasker` | Applies deterministic masking to classified values. |
+| `IAuditRepository` | Persists structured request outcomes. |
+
+Third-party types remain inside their adapters:
+
+- Hyrise types stay inside the SQL parser adapter.
+- libpqxx types stay inside the PostgreSQL adapter.
+- cpp-httplib types stay inside the HTTP adapter.
+
+The core depends only on project-defined types and interfaces. This keeps it independently testable and prevents infrastructure libraries from defining business behavior.
+
+## Why this design?
+
+### SQL analysis
+
+**Why?**
+
+Security decisions cannot safely depend on string matching. Comments, quoting, aliases, casing, and nested syntax make text-based SQL inspection unreliable.
+
+**Implementation**
+
+The service parses SQL into a real AST using `hyrise/sql-parser`. The adapter converts parser-specific objects into a project-owned `ParsedStatement`, and `SqlAnalyzer` produces a parser-independent `SqlAnalysis`.
+
+The analysis records, on a best-effort basis:
+
+- statement type and class;
+- statement count;
+- referenced tables;
+- SELECT projection columns;
+- DML affected columns;
+- wildcard and computed-projection flags;
+- unsupported features.
+
+**Trade-off**
+
+The service supports a bounded SQL subset. SQL that cannot be understood confidently is rejected. Broader coverage is valuable only if it preserves fail-closed behavior.
+
+### Policy enforcement
+
+**Why?**
+
+The service does not implement authentication, user identity, roles, or write authorization. Without a trusted identity, it cannot determine whether a caller should be allowed to modify database contents.
+
+**Implementation**
+
+The proxy follows a strict read-only policy:
+
+- supported single-statement `SELECT` queries may proceed;
+- DDL and DML are rejected before execution;
+- multiple statements are rejected;
+- unsupported statement types and features are rejected;
+- system-catalog access is rejected;
+- projection shapes that cannot be handled safely are rejected.
+
+Policy decisions use typed rejection reasons rather than free-form strings.
+
+The PostgreSQL account should also use a least-privilege, read-only role. The application policy is one layer of protection, not a replacement for database permissions.
+
+**Trade-off**
+
+The policy intentionally sacrifices write capabilities in exchange for a smaller and safer authorization model. This prevents the proxy from becoming a route for accidental or malicious data modification.
+
+### Classification logic
+
+**Why?**
+
+A sensitive column must not be treated as safe simply because its source cannot be determined.
+
+**Implementation**
+
+Classification combines:
+
+- the analyzed SELECT projection;
+- the column metadata returned by PostgreSQL;
+- a configurable, case-insensitive mapping of known PII column names.
+
+Each result column receives one of three states:
+
+- `Pii`
+- `NotClassifiedAsPii`
+- `Unattributed`
+
+`Unattributed` is intentionally distinct from non-PII. The classifier never guesses when attribution is incomplete.
+
+The supported PII categories are:
+
+- `PII.Email`
+- `PII.Phone`
+- `PII.CreditCard`
+
+The classifier receives column metadata only. It does not inspect row values, so sensitive values cannot enter or leak from the classification component.
+
+**Trade-off**
+
+Metadata-based classification is predictable and testable, but it cannot identify sensitive data stored under an unexpected or misleading column name.
+
+### Masking enforcement
+
+**Why?**
+
+Sensitive values must be transformed before any successful result leaves the proxy.
+
+**Implementation**
+
+Masking occurs after execution and classification, using the actual result-column order.
+
+The rules are deterministic and category-specific:
+
+```text
+Email
+lihi.roas@example.com -> l***@example.com
+
+Phone
+0501230101 -> ***0101
+
+Credit card
+4111111111111111 -> ****1111
+```
+
+The same category always follows the same masking rule.
+
+`NULL` remains `NULL`, and an empty string remains an empty string. The masker does not invent values where none exist.
+
+Before changing any result cell, the masker validates the complete classification and result shape. If masking cannot be applied safely, no partially masked result is returned.
+
+**Trade-off**
+
+The implementation uses deterministic redaction rather than tokenization, encryption, or reversible masking. These techniques provide different operational properties but are outside the scope of this service.
+
+### Audit quality
+
+**Why?**
+
+An audit trail should record request outcomes without becoming another source of sensitive-data leakage.
+
+**Implementation**
+
+Every request handled by the SQL pipeline produces one structured JSON Lines audit record.
+
+The record uses closed enums and numeric fields. It intentionally excludes:
+
+- raw or normalized SQL;
+- query values;
+- table and column names;
+- result values;
+- database error messages;
+- connection strings;
+- file paths.
+
+Successful results are not returned if the audit record cannot be persisted.
+
+**Trade-off**
+
+Excluding SQL and identifiers reduces forensic detail. This is an intentional privacy decision. The audit records what happened to the request, not its full payload.
+
+### System log
+
+The system log is separate from the audit trail.
+
+It currently records operational events such as:
+
+- startup and configuration;
+- the HTTP listening port;
+- startup failures;
+- audit persistence failures.
+
+It does not log SQL, identifiers, values, or database error text.
+
+Request-level latency, status metrics, and operational counters are possible future improvements.
+
+## Data setup
+
+The repository includes a demonstration schema and fabricated seed data:
+
+```text
+sql/
+├── schema.sql
+└── seed.sql
+```
+
+The schema contains `customers` and `orders`. The dataset covers:
+
+- email, phone, and credit-card masking;
+- joins and wildcard projections;
+- aliases;
+- `NULL` and empty-string behavior;
+- allowed and rejected policy outcomes.
+
+All stored card numbers are publicly documented, non-transactable test values.
+
+## Quick start
+
+Requirements:
+
+- Docker
+- Docker Compose
 
 ```bash
+git clone https://github.com/lihiSabag/SQL-Proxy-Service.git
+cd SQL-Proxy-Service
 docker compose up --build -d
-docker compose ps
-curl -s http://localhost:8080/health
 ```
 
-`docker compose ps` should show `postgres` as `healthy`; the health endpoint returns
-`{"status":"ok"}`.
-
-A query that demonstrates masking against the seeded data:
+Check that the service is running:
 
 ```bash
-curl -s -XPOST http://localhost:8080/query \
-     -H 'Content-Type: application/json' \
-     -d '{"sql":"SELECT * FROM customers ORDER BY id"}'
-```
-```json
-{"columns":["id","name","email","phone","credit_card"],
- "row_count":4,
- "rows":[["1","Lihi Roas","l***@example.com","***0101","****1111"],
-         ["2","Kim Perez","k***@example.org","***0102","****4444"],
-         ["3","Daniel Mizrahi","d***@example.net",null,"****0009"],
-         ["4","Yael Azulay","y***@example.com","",null]]}
+curl http://localhost:8080/health
 ```
 
-Email, phone and credit card are masked; `name` is not PII under the configured mapping; SQL `NULL`
-stays `null` and an empty string stays `""`.
-
-The audit trail is written to a named Docker volume:
-
-```bash
-docker compose exec sql-proxy cat /var/lib/sql-proxy/audit.jsonl
-```
-
-Stopping:
-
-```bash
-docker compose down      # stop, keep the database and audit history
-docker compose down -v   # also remove the demo database and audit history
-```
-
-> **Re-seeding.** `sql/schema.sql` and `sql/seed.sql` run only when the database volume is empty, on
-> first initialization. If you already have a `pgdata` volume from an earlier run, the seed data will
-> not be refreshed. Use `docker compose down -v` to force a clean re-seed.
-
-> **First build.** A clean `--no-cache` build takes roughly **5 minutes**, because every C++
-> dependency is compiled from source by vcpkg. Later builds reuse the cached dependency layer and are
-> far faster.
-
-> **Port already in use?** If something else is listening on 8080, set `PORT` before running,
-> in `.env` or in the shell (`PORT=8081 docker compose up --build -d`), and use the same port in
-> the `curl` commands.
-
-> **Demo credentials.** The Compose stack uses synthetic values (`sqlproxy` /
-> `sqlproxy_demo_password`) injected through the container environment. They are for local
-> demonstration only. **Do not reuse them in a real environment.** See
-> [Configuration](#configuration).
-
-## Request pipeline
-
-```
-HTTP request
-  → SQL analysis      (statement type, tables, projection)
-  → policy            (allow / reject, with a reason)
-  → execution         (run the allowed statement)
-  → classification    (which result columns carry PII)
-  → masking           (transform those values)
-  → audit             (record the outcome)
-  → HTTP response
-```
-
-Each stage is a separate component. `ProxyService` runs the sequence and owns no analysis, policy or
-masking logic of its own; the HTTP adapter chooses status codes and response shapes and nothing else.
-
-## Architecture overview
-
-The core holds the domain logic and depends only on its own types and three interfaces. Third-party
-libraries live behind adapters that implement those interfaces.
-
-```
-                    ProxyService
-                         |
-  SqlAnalyzer   PolicyEngine   DataClassifier   PiiMasker      core
-        |                                                       |
-   ISqlParser              IQueryExecutor          IAuditRepository    ports
-        |                        |                       |
- HyriseSqlParser    PostgresQueryExecutor    JsonlAuditRepository      adapters
-    (hyrise)              (libpqxx)               (JSON Lines)
-```
-
-| Directory | Contents |
-|---|---|
-| `src/core/` | analysis, policy, classification, masking, audit records, orchestration |
-| `src/ports/` | `ISqlParser`, `IQueryExecutor`, `IAuditRepository` |
-| `src/adapters/` | `parser/`, `postgres/`, `audit/`, `http/` |
-| `src/config/`, `src/logging/` | environment configuration, console logging |
-| `sql/` | `schema.sql`, `seed.sql` |
-| `tests/` | `core/`, `integration/`, `fakes/` |
-
-Third-party types stay inside their adapters: `hsql::` appears only in the parser adapter, `pqxx::`
-only in the PostgreSQL adapter, and `httplib::` only in the HTTP adapter. Because the core depends on
-interfaces rather than libraries, most of it is tested with hand-written fakes and no database.
-
-## SQL analysis
-
-`SqlAnalyzer` converts structured parser output into a parser-independent `SqlAnalysis`. It records
-the statement type and class, statement count, referenced tables, projection columns, wildcard and
-computed-projection flags, and features it could not model.
-
-The analyzer depends on the `ISqlParser` interface rather than a specific parser library.
-
-## SQL parsing
-
-Parsing uses [`hyrise/sql-parser`](https://github.com/hyrise/sql-parser), pinned to a specific
-commit and vendored through CMake `FetchContent`. It gives a real AST for the statement types
-supported by the proxy (`SELECT`, `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER`, `DROP`), and it
-reports multi-statement input, which a proxy has to be able to see. It ships pre-generated parser
-and lexer sources, so **the parser itself needs no bison or flex**.
-
-The parser sits behind the `ISqlParser` interface, and `HyriseSqlParser` is the only place `hsql::`
-types appear. Everything downstream, starting with `SqlAnalyzer`, sees only the project's own
-`ParsedStatement`, so the parser library can be swapped without touching the analysis, and the
-analyzer can be tested against a hand-written fake.
-
-**Parse errors are sanitized.** A rejected statement produces an error built only from fixed text
-plus a line and column number, never the parser's own message and never a fragment of the
-submitted SQL. A test forces a syntax error on input containing a distinctive literal and asserts
-the literal does not appear in the error.
-
-**Analysis is best-effort, and the design assumes that.** Where the analyzer knows its picture is
-incomplete, it reports that explicitly so later stages can decide how to handle it. Known
-limitations:
-
-- `ALTER TABLE … ADD COLUMN` does not parse (the parser supports `DROP COLUMN` only). Unsupported
-  ALTER syntax becomes a sanitized parse error.
-- Identifier case is preserved exactly as parsed. The parser neither case-folds unquoted
-  identifiers nor reports whether an identifier was quoted, so PostgreSQL-accurate case
-  normalization is impossible here.
-- Tables referenced only inside a `WHERE`-clause or projection subquery are invisible to the table
-  list. CTEs, set operations and `FROM`-subqueries are flagged as unsupported features.
-- `SELECT … FOR UPDATE` parses as a plain `SELECT`; the locking clause is not surfaced.
-- Statements outside the supported set (for example `SHOW`) parse successfully but map to the
-  `Unknown` statement type.
-
-## Access policy
-
-**The proxy is intentionally read-only: only `SELECT` is allowed.** Supporting write operations would
-require additional authorization semantics, broader audit rules, and handling write-specific SQL
-constructs. Those concerns are outside the current design.
-
-`PolicyEngine` consumes only a `SqlAnalysis` and returns a `PolicyDecision`: an `allowed` flag plus a
-typed `RejectReason`. The reason is an enum, never a string, so a decision cannot carry SQL text,
-identifiers, or data values. Defaults are fail-closed: a decision that was never evaluated reads as
-rejected.
-
-The rule set is evaluated in a fixed order, first match wins:
-
-| # | Condition | Rejection reason |
-|---|---|---|
-| 1–3 | empty input · unparseable · multiple statements | `EMPTY_INPUT` · `UNPARSEABLE_SQL` · `MULTIPLE_STATEMENTS` |
-| 4 | analysis reports "ok" but not exactly one statement | `MULTIPLE_STATEMENTS` (defensive) |
-| 5 | statement type outside the supported seven (`COPY`, `SHOW`, `BEGIN`, …) | `UNSUPPORTED_STATEMENT_TYPE` |
-| 6–7 | DDL · DML | `DDL_NOT_ALLOWED` · `DML_NOT_ALLOWED` |
-| 8 | analyzer flagged an unsupported feature | `UNSUPPORTED_SQL_FEATURE` |
-| 9 | `pg_catalog.*`, `information_schema.*`, or a `pg_*` table | `SYSTEM_TABLE_ACCESS` |
-| 10 | `SELECT *, col …`, a mixed wildcard and explicit projection | `UNATTRIBUTABLE_PROJECTION` |
-| 11 | otherwise: exactly one analyzed `SELECT` | **allowed** |
-
-Rules 6 and 7 cover more than they appear to. `TRUNCATE` parses as an ordinary `DELETE`, so the DML
-rule is what keeps it out, and `CREATE TABLE … AS SELECT` parses as `CREATE`, so the DDL rule catches
-it.
-
-Rules 3 and 4 are what uphold the executor's precondition that it receives exactly one approved
-statement. The executor deliberately never counts or splits SQL itself.
-
-Rule 8 comes before rule 9 on purpose: the catalog scan should only ever run against a table list the
-analyzer vouches for. If analysis is known to be incomplete, the request is rejected rather than
-checked against a list that may be missing entries.
-
-Rule 9 is **defense in depth, not a boundary**. It blocks direct catalog probes (`pg_authid`,
-`pg_stat_activity`, `information_schema`), which is most real-world catalog snooping, but a subquery
-can hide a reference the analyzer never sees. Matching is case-insensitive, because PostgreSQL folds
-unquoted identifiers while the parser preserves spelling. **The real enforcement boundary is
-PostgreSQL's own permission system**: run the service under a least-privilege, read-only role that
-has `SELECT` on exactly the tables it should read and nothing else.
-
-Rule 10 exists because `SELECT *, credit_card AS x FROM customers` defeats *both* ways of attributing
-a result column to its source: the star breaks positional alignment, and the alias breaks name
-lookup. The aliased column would otherwise reach the caller unclassified, so the request is rejected
-before it runs. See [Data classification](#data-classification) for the two attribution modes.
-
-Rule 11 is deliberately permissive about projection shape: plain columns, aliases, wildcards,
-computed projections and table-less selects are all allowed. General computed projections
-(`UPPER(email)`, `COUNT(*)`) are **not** rejected by policy. The classifier marks them
-`Unattributed` instead.
-
-The engine is a pure function of its input. It never sees raw SQL text, execution results, or an
-identity, and it performs no authentication, no roles, and no per-user rules.
-
-## Query execution
-
-`IQueryExecutor` is the port that runs an approved statement; `PostgresQueryExecutor` implements it
-over `libpqxx`. It executes the exact SQL text it is given, never a reconstructed query, and
-returns a database-neutral `ExecutionResult`: column names with a project-owned `ColumnType`, cells
-as `std::optional<std::string>` so SQL `NULL` and the empty string stay distinct, plus row and
-affected-row counts.
-
-Each call opens one connection and runs one transaction, committed only on success; any other path
-unwinds and the transaction aborts. `pqxx` types and exceptions never leave the adapter. Every
-failure comes back as an `ExecutionStatus` of `ConnectionFailure` or `ExecutionFailure`, which is
-also the default, so a partially populated result is a failure rather than a silent success.
-
-**Database errors are sanitized.** PostgreSQL messages routinely echo data values, and connection
-errors can echo connection details, so the returned error is assembled only from fixed text plus at
-most a five-character SQLSTATE code, never driver text, SQL fragments, or the connection string.
-Tests force a syntax error and a unique-violation carrying a distinctive literal and assert that
-neither the literal nor any statement fragment appears in the error.
-
-## Data classification
-
-`DataClassifier` decides **what each result column carries**, not what to do about it. It produces a
-`ClassificationResult` with exactly one entry per result column, in result-column order.
-
-Classification is **metadata- and mapping-based**. The classifier receives the SQL analysis and the
-result set's *column metadata*, never a single cell value and never a row. Because no data enters it,
-no data can leak from it, and its unit tests construct nothing but an analysis and a column list.
-
-A small configured map drives it: `email → PII.Email`, `phone → PII.Phone`,
-`credit_card → PII.CreditCard`, matched case-insensitively. The map is constructor-injectable, so a
-differently named column can be classified without touching the schema. A config whose keys collide
-after normalization is refused at construction rather than silently resolved to one of them.
-
-Each column ends up in one of three states. Three, deliberately, not two:
-
-| State | Meaning |
-|---|---|
-| `NotClassifiedAsPii` | examined, and not sensitive under the configured mapping |
-| `Pii` | carries one of the three categories |
-| `Unattributed` | **could not determine** what this column carries |
-
-`Unattributed` is the fail-closed default, and `fully_attributed` is false whenever any column holds
-it. Collapsing "not sensitive" into "unknown" is exactly the bug that would let unidentified data
-flow onward as if it had been checked.
-
-Two attribution modes:
-
-- **Positional** (plain or aliased explicit projections): result column *i* is attributed to
-  projection column *i*, with any qualifier stripped, so `customers.email` and `c.email` both look up
-  `email`. This is what makes aliases useless as an evasion: `SELECT email AS contact` is still
-  classified from `email`, not from the result name `contact`.
-- **Wildcard** (`SELECT *` alone): the database returns the true source column names, so name lookup
-  is exact.
-
-Everything else, including computed projections, projection/result count mismatches, and any
-analysis that is not a single successful `SELECT`, yields all columns `Unattributed`. The classifier
-never guesses a source column, never shifts indices, never classifies a partial prefix, and never
-quietly downgrades an unknown column to "not sensitive".
-
-Two details worth stating:
-
-- **Duplicate result column names are safe.** A join can produce two columns both named `email`;
-  classifications are stored **by index**, never in a name-keyed map that would collapse them.
-- **Joins are handled by column name only.** A qualifier in a projection is a table *alias* the
-  analysis cannot resolve back to a real table, so it is stripped and the bare column name is looked
-  up. Column-name-only mappings over-classify at worst, which is the safe direction.
-
-Policy rule 10 removes the one shape that would otherwise be ambiguous in a dangerous way, a mixed
-wildcard and explicit projection, before execution. General computed projections are still allowed
-by policy and simply classify as `Unattributed`; what a later stage does with an unattributed column
-is not decided here.
-
-**Why not detect PII by inspecting values?** A regex scanner is wrong in both directions: a 16-digit
-order reference matches a card pattern, an unusually formatted phone number matches nothing, and
-per-row verdicts make column-level decisions incoherent (treat the column as sensitive because row 3
-matched?). Real products do value scanning with trained detectors, validators and review workflows; a
-quick regex imitates the feature while faking its reliability. The cost of this choice is real and
-stated plainly: **PII in an unmapped or misleadingly named column is invisible.** Metadata-based
-classification cannot see that a `notes` column contains card numbers.
-
-Classification decides *what* a column is; masking decides how it is transformed.
-
-## PII masking
-
-`PiiMasker` transforms values **only** according to the classification it is given. It never
-re-classifies; a value is inspected solely to apply the already-chosen transformation, so a `notes`
-column containing an email address is returned untouched.
-
-| Category | Rule | Example |
-|---|---|---|
-| `PII.Email` | keep the first character and the domain | `lihi.roas@example.com` → `l***@example.com` |
-| `PII.Phone` | 7+ digits → `***` + last four, formatting discarded | `0501230101` → `***0101` |
-| `PII.CreditCard` | 12+ digits → `****` + last four | `4111111111111111` → `****1111` |
-
-Across all three: **`NULL` stays `NULL`** and **`""` stays `""`**. Masking transforms values, it
-does not fabricate them; turning a `NULL` card into `***` would assert that a customer has a card
-when the truthful answer is "none recorded". Every other non-empty value **always changes**; anything
-malformed falls back to `***` rather than passing through.
-
-Two deliberate trade-offs:
-
-- **The email domain is preserved.** `l***@example.com` is the industry-familiar format and keeps
-  output readable, but a domain can identify a person at a small organization. Masking the domain as
-  well is a one-line change if that risk matters more than legibility.
-- **Phones are masked partially.** The last four digits are what a support workflow realistically
-  needs; full redaction is the alternative.
-
-Card numbers are masked to a uniform width, so a 15-digit Amex and a 16-digit Visa are
-indistinguishable in the output, so the masked form leaks neither length nor network. There is no
-Luhn check: validating a value would be classification by another name, and classification is
-already settled by then.
-
-**A masking call either returns a fully masked result or no result at all.** `MaskingOutcome` is
-success-or-failure by type: a failure cannot carry a result, so partially masked data is not
-representable. It cannot be default-constructed either, because a default would masquerade as a
-success the masker never produced. Reading the wrong side of an outcome throws rather than returning
-something plausible.
-
-Masking runs in two phases. Phase one validates everything, including column counts, every row's
-width and the classification invariants, before a single cell is touched. Phase two is total for
-validated input: it works by column **index**, so duplicate column names are irrelevant, and column
-order, row order, result shape and column metadata all pass through unchanged.
-
-An `Unattributed` column is refused, not redacted:
-
-| Failure | Meaning |
-|---|---|
-| `UNATTRIBUTED_COLUMN` | classification could not account for every column: the expected fail-closed outcome |
-| `STRUCTURAL_MISMATCH` | shapes do not line up |
-| `INVALID_CLASSIFICATION` | classification invariants are broken |
-
-Refusing rather than blanket-redacting is deliberate: a column nobody could identify should not be
-returned at all, and it should not be *value*-inspected in a last-minute attempt to identify it.
-
-Two properties worth stating plainly. The masker contains **no logging**, since it is the one
-component guaranteed to hold raw PII. And **idempotence is not claimed**: there is no already-masked
-detection, because the pipeline invariant is that masking happens exactly once.
-
-## Audit trail
-
-An `AuditRecord` describes one controlled request outcome. Records are written as one JSON object per
-line (JSON Lines) through the `IAuditRepository` port, implemented by `JsonlAuditRepository`:
+Expected response:
 
 ```json
-{"column_count":5,"outcome":"SUCCESS","pii_credit_card_columns":1,"pii_email_columns":1,"pii_phone_columns":1,"request_id":1,"row_count":4,"statement_type":"SELECT","timestamp":"2026-08-04T09:23:33.265Z"}
-{"outcome":"POLICY_REJECTED","reason":"DDL_NOT_ALLOWED","request_id":2,"statement_count":1,"statement_type":"DROP","timestamp":"2026-08-04T09:23:45.419Z"}
-{"outcome":"PARSING_FAILURE","request_id":3,"timestamp":"2026-08-04T09:23:45.424Z"}
-{"column_count":1,"outcome":"MASKING_REFUSED","request_id":5,"statement_type":"SELECT","timestamp":"2026-08-04T09:23:45.433Z"}
-{"category":"EXECUTION_FAILURE","outcome":"DATABASE_FAILURE","request_id":6,"statement_type":"SELECT","timestamp":"2026-08-04T09:23:45.454Z"}
-```
-
-**What is recorded, and why it is enough.** The questions an auditor actually asks are *what kind of
-statement was this, what did we decide, how much data was exposed, and was it masked*, so each
-record carries a UTC timestamp, a request id, the outcome, the statement type, and outcome-specific
-counts: rows and columns returned, and how many result **columns** (not cells) fell into each PII
-category. `SUCCESS` implies masking completed; `MASKING_REFUSED` implies it did not. Those facts are
-derived from the outcome rather than stored, so a record cannot contradict itself. The outcome is
-read from which detail alternative is present, and there is no separate field to disagree with it.
-
-**What is deliberately *not* recorded, and why.** No SQL text, raw or normalized or hashed. No result
-values, masked or otherwise. No column, alias, table or schema names. No database or exception
-messages. No file paths, credentials, or connection strings. No user identity.
-
-This is the security decision the audit design turns on. **SQL text routinely embeds the very data
-the proxy exists to protect.** `WHERE email = 'lihi.roas@example.com'` would put PII into the audit
-log permanently, in a file that outlives the request and is read by more people than the result ever
-was. A hash does not fix it either: hashing preserves equality, so records become joinable by query,
-and short predictable statements fall to a dictionary attack that reconstructs the text.
-
-The guarantee is structural, not procedural: `AuditRecord` **has no free-form string field**. Its
-members are enums, integers and a timestamp, so SQL, values and names are not "filtered out". They
-are unrepresentable. Even the failure vocabulary is a closed enum, so an I/O error cannot smuggle a
-path or an `errno` string into the trail.
-
-A record cannot be default-constructed; each outcome has its own factory, and the factories refuse
-combinations that would misdescribe the event: a parse failure is audited only as `PARSING_FAILURE`
-and never duplicated as a policy rejection, and outcomes reachable only for `SELECT` under the
-read-only policy insist on it. Reading the wrong detail type throws rather than returning something
-plausible.
-
-PII category counts are recorded **only for `SUCCESS`**. When masking is refused the classification
-was incomplete by definition, and a count such as `pii_email_columns: 0` for
-`SELECT CONCAT(name, email) …` would be precise, closed-vocabulary, and *misleading*.
-
-The JSONL adapter is the only place `nlohmann::json` appears in this part of the system. Objects are
-built through the JSON library rather than by string concatenation, field names are compile-time
-literals, enum values come from the closed `to_string` tables, and **inapplicable fields are omitted
-entirely** rather than written as null or zero placeholders. Timestamps are formatted as
-deterministic ISO-8601 UTC with milliseconds, in the adapter, so the core record model stays free of
-presentation concerns.
-
-**Durability, stated honestly.** Each record is written and flushed to the OS on append, and an
-instance mutex prevents interleaving between threads in one process. There is no `fsync`, no
-multi-process locking, and no recovery from a crash mid-write, so a hard kill can cost the trailing
-line. The file is opened in append mode, created if missing, and never read back, so existing
-contents are preserved and malformed pre-existing lines never block new appends. Failures are
-reported as `OPEN_FAILURE` or `WRITE_FAILURE`, with no path and no OS text, and are not retried.
-
-**Audit is not application logging.** The system log narrates operations for whoever is running the
-service; the audit trail records outcomes for later review. Different audiences, different rules,
-different destinations.
-
-**Every controlled SQL request produces exactly one audit append attempt**, whether it succeeded,
-was rejected or failed. That is structural: the orchestrator's internal step returns a client result
-and an audit record together, from every path, and there is exactly one call site that appends.
-
-## Platform support
-
-| Path | Status |
-|---|---|
-| **Native Linux** | Supported and verified. Every build and test result quoted here was produced on Ubuntu 24.04, g++ 13, CMake 3.28, PostgreSQL 16.14. |
-| **Docker Compose** | Verified. A clean `--no-cache` build and a fresh-volume startup were verified against the containerized PostgreSQL. |
-| **Windows / MSVC** | Not verified. The code is standard C++17 and every dependency supports Windows, but the build has never been run there, so it is listed under [Future work](#future-work) rather than claimed. |
-| **macOS** | Not verified. Running the Docker path on macOS runs a Linux container, which is not native macOS support. |
-
-## Prerequisites
-
-Two supported paths: **Docker Compose** (no local toolchain, see
-[Quick start](#quick-start-with-docker-compose)) or a **native build** with the toolchain below.
-
-Developed on **Ubuntu 24.04, g++ 13, CMake 3.28, PostgreSQL 16**.
-
-```bash
-sudo apt-get update
-sudo apt-get install -y build-essential cmake git curl zip unzip tar \
-                        pkg-config autoconf libtool bison flex \
-                        postgresql postgresql-client
-```
-
-`bison` and `flex` are listed for vcpkg, not for the SQL parser: `hyrise/sql-parser` ships
-pre-generated sources and needs neither, but vcpkg may need both when it builds the
-PostgreSQL/`libpq` chain from source on a fresh machine. Both are build-time only: neither is a
-runtime dependency, and neither is linked into the service.
-
-Dependencies come from vcpkg in manifest mode (`vcpkg.json`):
-
-```bash
-git clone https://github.com/microsoft/vcpkg ~/vcpkg && ~/vcpkg/bootstrap-vcpkg.sh
-```
-
-`hyrise/sql-parser` is fetched by CMake at a pinned commit; it is not a vcpkg dependency.
-
-## Build
-
-```bash
-cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$HOME/vcpkg/scripts/buildsystems/vcpkg.cmake"
-cmake --build build -j
-```
-
-The first configure builds the dependencies from source and takes a while; later builds are fast.
-
-Produces `build/sql_proxy_service`, `build/sql_proxy_unit_tests`,
-`build/sql_proxy_http_tests` and `build/sql_proxy_integration_tests`.
-
-## Database setup
-
-Create a role and database, then apply the schema and seed data:
-
-```bash
-sudo -u postgres psql <<'SQL'
-CREATE ROLE sql_proxy_user LOGIN PASSWORD 'change-me';
-CREATE DATABASE sql_proxy OWNER sql_proxy_user;
-SQL
-
-psql "postgresql://sql_proxy_user@localhost:5432/sql_proxy" -f sql/schema.sql
-psql "postgresql://sql_proxy_user@localhost:5432/sql_proxy" -f sql/seed.sql
-```
-
-`sql/schema.sql` creates two tables and **drops only those two**, never a database or schema:
-
-| Table | Columns |
-|---|---|
-| `customers` | `id`, `name`, `email`, `phone`, `credit_card` |
-| `orders` | `id`, `customer_id` → `customers(id)`, `amount`, `created_at` |
-
-`sql/seed.sql` inserts four customers and four orders. All values are fabricated, and the coverage
-is deliberate: two normal phone numbers, one `NULL` phone and one empty-string phone (so the NULL vs
-`""` distinction is demonstrable), and card numbers in two lengths.
-
-> **All stored credit-card numbers are synthetic test values**, the publicly published
-> non-transactable test numbers (`4111…`, `5555…`, `3782…`). No real cardholder data is present
-> anywhere in this repository.
-
-For least privilege, grant the service role only what it needs. The proxy is intended to run under a
-**read-only** role: its own checks are best-effort, and database permissions are the boundary that
-actually holds.
-
-```sql
-REVOKE ALL ON ALL TABLES IN SCHEMA public FROM sql_proxy_user;
-GRANT SELECT ON customers, orders TO sql_proxy_user;
-```
-
-## Configuration
-
-All configuration is environment variables. Errors name the variable, never its value.
-
-| Variable | Required | Default | Purpose |
-|---|---|---|---|
-| `PORT` | no | `8080` | HTTP listen port |
-| `DATABASE_URL` | **yes** | n/a | libpq connection URI. Treated as a secret: never logged, never returned in an error, never printed by tests. |
-| `DB_STATEMENT_TIMEOUT_MS` | no | `5000` | per-statement timeout, applied as `SET LOCAL statement_timeout`; must be a positive integer up to 600000 |
-| `AUDIT_LOG_PATH` | no | `audit.jsonl` | JSON Lines audit sink |
-
-Startup fails fast with a clear message and exit code 1 if `DATABASE_URL` is missing or another value
-is invalid. Errors name the variable, never its value.
-
-**The service reads these from the process environment (`getenv`) and never parses a `.env` file
-itself.** Docker Compose optionally reads `.env` and passes values into the container; a native run
-does not, so export them yourself:
-
-```bash
-set -a; . ./.env; set +a     # or export each variable individually
-```
-
-`.env.example` documents every variable. Copying it is **optional**, because `docker-compose.yml`
-carries the same synthetic defaults inline, so the demo runs without creating `.env` at all.
-
-### Credentials: native vs Docker
-
-**Native: keep the password out of `DATABASE_URL`.** Put it in `~/.pgpass` (mode `600`) and omit it
-from the URL, so it never appears in your shell history, the process list, or the environment:
-
-```
-localhost:5432:sql_proxy:sql_proxy_user:change-me
-```
-```bash
-export DATABASE_URL="postgresql://sql_proxy_user@localhost:5432/sql_proxy"
-```
-
-**Docker Compose: a synthetic demo credential is injected through the container environment.** This
-is a deliberate trade-off: baking a `.pgpass` file into the image or bind-mounting a host-specific
-one would tie the image to one machine and put a credential file inside a distributable artifact. The
-Compose credential is **synthetic, for local demonstration only, and must not be reused in a real
-environment.** For a real deployment neither applies: inject the credential from a secrets manager
-and keep it out of the image, the compose file, and the repository.
-
-## Running
-
-```bash
-export DATABASE_URL="postgresql://sql_proxy_user@localhost:5432/sql_proxy"
-export AUDIT_LOG_PATH="./audit.jsonl"
-./build/sql_proxy_service
-```
-
-Stop with `Ctrl-C` / `SIGTERM`.
-
-## API
-
-### `GET /health`
-
-```console
-$ curl -s localhost:8080/health
 {"status":"ok"}
 ```
 
-### `POST /query`
+Run a query:
 
-```console
-$ curl -s -XPOST localhost:8080/query -H 'Content-Type: application/json' \
-       -d '{"sql":"SELECT id, name, email FROM customers ORDER BY id"}'
-{"columns":["id","name","email"],
- "row_count":4,
- "rows":[["1","Lihi Roas","l***@example.com"],
-         ["2","Kim Perez","k***@example.org"],
-         ["3","Daniel Mizrahi","d***@example.net"],
-         ["4","Yael Azulay","y***@example.com"]]}
+```bash
+curl -X POST http://localhost:8080/query \
+  -H "Content-Type: application/json" \
+  -d '{"sql":"SELECT id, name, email, phone, credit_card FROM customers ORDER BY id"}'
 ```
 
-Rows are **positional arrays**, not objects: column order is preserved and duplicate column names
-(`SELECT email, email …`) both survive, which a JSON object would silently collapse. SQL `NULL`
-becomes JSON `null` and an empty string stays `""`. Column metadata is returned even when there are
-zero rows.
+Example masked row:
 
-Failures return `{"error":"<code>","message":"<fixed text>"}` and never contain SQL, values, column
-or table names, SQLSTATE codes, or driver text:
+```json
+["1", "Lihi Roas", "l***@example.com", "***0101", "****1111"]
+```
 
-| Situation | Status | `error` |
-|---|---|---|
-| bad content type | `400` | `invalid_content_type` |
-| body is not a JSON object | `400` | `invalid_json` |
-| missing or non-string `sql` field | `400` | `invalid_request` |
-| `sql` longer than 64 KiB | `400` | `sql_too_large` |
-| empty `sql` | `400` | `empty_sql` |
-| SQL could not be parsed | `400` | `invalid_sql` |
-| rejected by policy (any reason) | `403` | `policy_rejected` |
-| the database rejected the statement | `400` | `query_failed` |
-| the database was unreachable | `503` | `database_unavailable` |
-| results could not be safely masked | `422` | `masking_refused` |
-| internal error, including an audit write failure on an otherwise successful request | `500` | `internal_error` |
+Stop the environment:
 
-**Every policy denial returns the same generic `403`.** The audit record keeps the precise reason;
-the client cannot tell a system-catalog rejection from a DML rejection, so the rule set cannot be
-mapped by probing. The transport-level `400`s are the exception in another sense: they are rejected
-before the pipeline runs and produce **no** audit record, because they are malformed HTTP requests
-rather than SQL requests.
-
-## Concurrency model
-
-`ProxyService` serializes the entire pipeline behind one mutex: **one controlled SQL request is
-processed at a time.** The executor itself is safe to call concurrently, since it holds no shared
-mutable state and opens a connection per call, but without a connection pool N concurrent requests
-would open N simultaneous database connections with no upper bound. Serializing bounds that to one
-and keeps behaviour deterministic. Throughput is explicitly out of scope; a connection pool behind
-`IQueryExecutor` plus removing this lock is listed under [Future work](#future-work), and it touches
-no core contract.
+```bash
+docker compose down -v
+```
 
 ## Testing
 
-Three executables, **198 tests in total**, all passing on the reference environment:
+The project contains 198 tests:
 
-| Executable | Tests | Needs a database |
-|---|---|---|
-| `sql_proxy_unit_tests` | 152 | no |
-| `sql_proxy_http_tests` | 12 | no |
-| `sql_proxy_integration_tests` | 34 | yes (11 executor, 23 end-to-end) |
+| Suite | Count |
+|---|---:|
+| Unit | 152 |
+| HTTP contract | 12 |
+| PostgreSQL integration and end-to-end | 34 |
+| **Total** | **198** |
 
-The first two never skip.
+The test suites cover:
 
-```bash
-# Unit tests: configuration, analysis, policy, classification, masking, audit, orchestration
-./build/sql_proxy_unit_tests
-
-# HTTP contract tests: request/response shapes, status codes, leak assertions
-./build/sql_proxy_http_tests
-
-# Executor and end-to-end tests: REQUIRE a real PostgreSQL (see below)
-export TEST_DATABASE_URL="postgresql://sql_proxy_test_user@localhost:5432/sql_proxy_test"
-SQL_PROXY_TEST_DB_RESET=1 ./build/sql_proxy_integration_tests
-
-(cd build && ctest -L unit)     # or -L http, -L postgres, or ctest for everything
-```
-
-The database-backed tests are **fail-closed by design**, because they drop and recreate the demo
-tables:
-
-1. `TEST_DATABASE_URL` must name the dedicated database `sql_proxy_test`. Any other name is a hard
-   failure with **zero SQL executed**, so pointing the suite at a real database cannot cause writes.
-2. Destructive setup additionally requires `SQL_PROXY_TEST_DB_RESET=1`. Without it the suite skips.
-
-A skipped run is never counted as verification. Set up the dedicated test database once:
-
-```bash
-sudo -u postgres psql <<'SQL'
-CREATE ROLE sql_proxy_test_user LOGIN PASSWORD 'test-only';
-CREATE DATABASE sql_proxy_test OWNER sql_proxy_test_user;
-SQL
-```
-
-The executor tests write to their own tables, so this database must be separate from the one the
-service runs against.
-
-### End-to-end tests
-
-The end-to-end suite drives the **real** pipeline (real parser, real analysis, real policy, real
-PostgreSQL executor, real classifier, masker and JSONL audit) through the actual HTTP handler, with
-no fakes anywhere. Each test gets its own temporary directory and audit file and issues one request,
-so nothing carries between tests; both suites reset the schema and seed data at their first test, so
-neither depends on leftover database state or on running in a particular order.
-
-Every masked value is asserted exactly against the seeded data, including `NULL` versus the empty
-string and both card lengths. Audit lines are checked **structurally**, not by substring search: each
-line is parsed, its key set must match the closed schema for its outcome, forbidden keys must be
-absent, and every string value must be either a shape-checked UTC timestamp or a closed-vocabulary
-enum value. A substring sweep would be useless here, since legitimate audit content contains the
-strings `SELECT` and `pii_email_columns`.
-
-The end-to-end tests do not cover `main.cpp`'s process wiring: configuration resolution, component
-construction and signal handling. Running the built binary directly covers that.
+- parser and analyzer contracts;
+- policy rule order and rejection reasons;
+- real PostgreSQL execution;
+- classification and masking invariants;
+- structured audit persistence;
+- HTTP response behavior;
+- the complete production pipeline with a real database.
 
 ## Known limitations
 
-Stated plainly, because each one is a deliberate trade-off rather than an oversight.
+- SQL coverage is intentionally bounded by the parser and adapter.
+- Some advanced `ALTER TABLE` syntax is unsupported.
+- Computed projections that cannot be attributed safely are refused instead of being returned without masking.
+- Table references hidden inside some subqueries may not be visible to the analyzer.
+- Identifier normalization follows a simplified ASCII case model rather than full PostgreSQL identifier semantics.
+- Requests are currently processed serially, and each execution opens a short-lived database connection.
+- Audit writes are flushed, but host-crash durability through `fsync` is not guaranteed.
+- Authentication, authorization, and role-aware policy are not implemented.
+- A statement timeout is currently reported as HTTP 400 together with other execution failures.
 
-**SQL coverage**
+### Predicate inference
 
-- `ALTER TABLE … ADD COLUMN` does not parse. The parser supports `DROP COLUMN` only, so other ALTER
-  syntax becomes a sanitized parse error and is rejected before anything runs.
-- Tables referenced only inside a `WHERE`-clause or projection subquery are invisible to the table
-  list. CTEs, set operations and `FROM`-subqueries are flagged as unsupported features and rejected,
-  so an incomplete picture leads to a refusal rather than a guess.
-- Identifier case is preserved exactly as parsed. The parser neither case-folds unquoted identifiers
-  nor reports whether an identifier was quoted, so PostgreSQL-accurate case normalization cannot be
-  reproduced here. The system-catalog deny rule matches case-insensitively on purpose.
-- `SELECT … FOR UPDATE` parses as a plain `SELECT` and the locking clause is not surfaced. A
-  read-only database role removes the exposure.
+The proxy prevents direct disclosure of sensitive values in query results. It does not attempt to prevent inference through repeated predicates over sensitive columns.
 
-**Classification and masking**
+For example, a caller may learn information from repeated `WHERE` conditions even when the sensitive column is not included in the returned projection.
 
-- PII in an unmapped or misleadingly named column is invisible. Classification is driven by column
-  metadata and a configured mapping, so it cannot see that a `notes` column contains card numbers.
-  Closing this gap needs value-level scanning, which is listed under [Future work](#future-work).
-- Computed projections are refused rather than masked. `SELECT UPPER(email) …` and, as collateral,
-  `SELECT COUNT(*) …` and `SELECT 1` return `422`. The parser does not preserve the source column of
-  an expression, so the result column can be attributed by neither name nor position, and returning
-  it unmasked would not be acceptable. Refusing is the fail-closed choice, and the aggregate case is
-  a real cost of it.
-- The masked email keeps the domain. That is the familiar format and keeps output readable, but a
-  domain can identify a person at a small organization.
+Production systems usually address this broader threat with complementary controls such as:
 
-**Runtime**
+- trusted user identity and authorization;
+- rate limiting;
+- query-pattern monitoring;
+- anomaly detection;
+- operational alerting;
+- predicate-aware access policies.
 
-- A database execution failure returns `400`. That is right for a genuinely malformed statement, but
-  a statement timeout is a server-side condition reported to the caller as if the request were at
-  fault. Separating them would mean a coarse typed category from the executor, never a raw SQLSTATE.
-- One request is processed at a time, and each accepted statement opens its own database connection.
-  There is no connection pool. See [Concurrency model](#concurrency-model).
-- Audit durability is process-level. Records are written and flushed to the OS, but there is no
-  `fsync`, no multi-process locking and no recovery from a crash mid-write. See
-  [Audit trail](#audit-trail).
-- There is no authentication, and no user identity is recorded. An unauthenticated caller-supplied
-  identifier in an audit record would look like accountability without providing it.
+Output masking alone is not intended to solve this class of inference attack.
 
 ## Future work
 
-In rough order of value:
+Potential extensions include:
 
-1. **Connection pooling and concurrent request handling**, introduced behind `IQueryExecutor`. This
-   is confined to one adapter plus removing the service-level lock, and touches no core contract.
-2. **Value-level PII detection** as a second layer behind the metadata mapping, catching PII in
-   unmapped columns. Worth doing only with proper validators and a false-positive strategy.
-3. **Expression lineage in the analyzer**, so `UPPER(email)` can be attributed to `email` and masked
-   instead of refused, which would also let aggregates through.
-4. **A typed resource-limit category from the executor**, so a statement timeout maps to a
-   server-side status rather than `400`.
-5. **Authentication and per-caller policy**, which would also give the audit trail a real identity to
-   record.
-6. **A verified Windows/MSVC build.** The code is standard C++17 and every dependency supports
-   Windows, but it has never been built or tested there.
+- broader parser coverage while preserving fail-closed behavior;
+- predicate-aware policy enforcement;
+- role-aware authorization;
+- safe support for selected computed expressions;
+- additional PII categories;
+- request-level operational metrics;
+- connection pooling and concurrent request processing;
+- configurable audit durability.
