@@ -7,8 +7,8 @@ result set, masks it before anything is returned, and records an audit entry for
 Written in C++17. Developed on Linux.
 
 The service currently exposes only the health endpoint. The core now includes a tested SQL analysis
-component backed by a real SQL parser, and a PostgreSQL execution layer tested against a real
-database; neither is connected to the HTTP service yet.
+component backed by a real SQL parser, a read-only access policy, and a PostgreSQL execution layer
+tested against a real database; none of them is connected to the HTTP service yet.
 
 ## Planned request pipeline
 
@@ -63,6 +63,54 @@ limitations:
 - `SELECT … FOR UPDATE` parses as a plain `SELECT`; the locking clause is not surfaced.
 - Statements outside the supported set (for example `SHOW`) parse successfully but map to the
   `Unknown` statement type.
+
+## Access policy
+
+**The proxy is intentionally read-only: only `SELECT` is allowed.** Supporting write operations would
+require additional authorization semantics, broader audit rules, and handling write-specific SQL
+constructs. Those concerns are outside the current design.
+
+`PolicyEngine` consumes only a `SqlAnalysis` and returns a `PolicyDecision`: an `allowed` flag plus a
+typed `RejectReason`. The reason is an enum, never a string, so a decision cannot carry SQL text,
+identifiers, or data values. Defaults are fail-closed — a decision that was never evaluated reads as
+rejected.
+
+The rule set is evaluated in a fixed order, first match wins:
+
+| # | Condition | Rejection reason |
+|---|---|---|
+| 1–3 | empty input · unparseable · multiple statements | `EMPTY_INPUT` · `UNPARSEABLE_SQL` · `MULTIPLE_STATEMENTS` |
+| 4 | analysis reports "ok" but not exactly one statement | `MULTIPLE_STATEMENTS` (defensive) |
+| 5 | statement type outside the supported seven (`COPY`, `SHOW`, `BEGIN`, …) | `UNSUPPORTED_STATEMENT_TYPE` |
+| 6–7 | DDL · DML | `DDL_NOT_ALLOWED` · `DML_NOT_ALLOWED` |
+| 8 | analyzer flagged an unsupported feature | `UNSUPPORTED_SQL_FEATURE` |
+| 9 | `pg_catalog.*`, `information_schema.*`, or a `pg_*` table | `SYSTEM_TABLE_ACCESS` |
+| 10 | otherwise: exactly one analyzed `SELECT` | **allowed** |
+
+Rules 6 and 7 cover more than they appear to. `TRUNCATE` parses as an ordinary `DELETE`, so the DML
+rule is what keeps it out, and `CREATE TABLE … AS SELECT` parses as `CREATE`, so the DDL rule catches
+it.
+
+Rules 3 and 4 are what uphold the executor's precondition that it receives exactly one approved
+statement — the executor deliberately never counts or splits SQL itself.
+
+Rule 8 comes before rule 9 on purpose: the catalog scan should only ever run against a table list the
+analyzer vouches for. If analysis is known to be incomplete, the request is rejected rather than
+checked against a list that may be missing entries.
+
+Rule 9 is **defense in depth, not a boundary**. It blocks direct catalog probes (`pg_authid`,
+`pg_stat_activity`, `information_schema`), which is most real-world catalog snooping, but a subquery
+can hide a reference the analyzer never sees. Matching is case-insensitive, because PostgreSQL folds
+unquoted identifiers while the parser preserves spelling. **The real enforcement boundary is
+PostgreSQL's own permission system**: run the service under a least-privilege, read-only role that
+has `SELECT` on exactly the tables it should read and nothing else.
+
+Rule 10 is structural, not a judgement about the result set: wildcards, aliases, computed projections
+and table-less selects are all allowed, because at this stage the question is only whether a single
+supported `SELECT` may run.
+
+The engine is a pure function of its input — it never sees raw SQL text, execution results, or an
+identity, and it performs no authentication, no roles, and no per-user rules.
 
 ## Query execution
 
@@ -204,7 +252,7 @@ $ curl -s localhost:8080/health
 Two executables. The unit tests need no database and never skip.
 
 ```bash
-# Unit tests — configuration and SQL analysis
+# Unit tests — configuration, SQL analysis and policy
 ./build/sql_proxy_unit_tests
 
 # Executor tests — REQUIRE a real PostgreSQL (see below)
