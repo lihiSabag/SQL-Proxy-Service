@@ -69,12 +69,15 @@ add_executable(sql_proxy_unit_tests
     tests/core/sql_analyzer_test.cpp
     tests/core/sql_parser_contract_test.cpp
     tests/core/policy_engine_test.cpp
+    tests/core/data_classifier_test.cpp
     src/config/server_config.cpp
     src/config/database_config.cpp
     src/core/sql_analysis.cpp
     src/core/sql_analyzer.cpp
     src/core/policy_decision.cpp
     src/core/policy_engine.cpp
+    src/core/data_classification.cpp
+    src/core/data_classifier.cpp
     src/adapters/parser/hyrise_sql_parser.cpp
 )
 

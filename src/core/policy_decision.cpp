@@ -24,6 +24,8 @@ const char* to_string(RejectReason reason) {
             return "DML_NOT_ALLOWED";
         case RejectReason::SystemTableAccess:
             return "SYSTEM_TABLE_ACCESS";
+        case RejectReason::UnattributableProjection:
+            return "UNATTRIBUTABLE_PROJECTION";
     }
     return "NOT_EVALUATED";
 }

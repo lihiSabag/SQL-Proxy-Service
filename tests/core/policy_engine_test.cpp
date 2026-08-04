@@ -1,6 +1,6 @@
 // PolicyEngine unit tests. Analyses are constructed directly as structs —
 // no parser, no database. RN comments reference the rule order
-// (R1–R10, first match wins).
+// (R1–R11, first match wins).
 
 #include <memory>
 #include <string>
@@ -150,7 +150,7 @@ TEST(PolicyEngineTest, NearMissTableNamesStayAllowed) {
 
 // --- Allow path --------------------------------------------------------------
 
-TEST(PolicyEngineTest, AllowedSelectShapes) {  // R10
+TEST(PolicyEngineTest, AllowedSelectShapes) {  // R11
     core::SqlAnalysis plain = select_on({"customers"});
     plain.projection_columns = {"id", "email"};
     expect_allowed(plain);
@@ -164,10 +164,22 @@ TEST(PolicyEngineTest, AllowedSelectShapes) {  // R10
     expect_allowed(tableless);
 }
 
-// Projection shape does not affect the decision: this gate is structural.
-// Computed projections over tables (UPPER(email), CONCAT(name, email),
-// COUNT(*)) and a wildcard combined with explicit columns are all allowed.
-TEST(PolicyEngineTest, ProjectionShapesDoNotAffectTheDecision) {
+TEST(PolicyEngineTest, MixedWildcardProjectionIsRejected) {  // R10
+    // SELECT *, credit_card AS x FROM customers — defeats both classification
+    // attribution modes (star breaks positions, alias breaks names), so the
+    // aliased column would reach the caller unclassified.
+    core::SqlAnalysis a = select_on({"customers"});
+    a.has_wildcard_projection = true;
+    a.projection_columns = {"credit_card"};
+    expect_rejected(a, core::RejectReason::UnattributableProjection);
+}
+
+// Pins CURRENT behavior: general computed projections over tables
+// (UPPER(email), CONCAT(name, email), COUNT(*)) remain ALLOWED by policy.
+// The classifier marks them Unattributed rather than guessing a source
+// column. Whether policy should reject them outright is an open question; if
+// that rejection is adopted later, this test must change with it.
+TEST(PolicyEngineTest, ComputedProjectionIsCurrentlyAllowed) {
     core::SqlAnalysis computed = select_on({"customers"});
     computed.has_computed_projection = true;
     expect_allowed(computed);
@@ -176,13 +188,6 @@ TEST(PolicyEngineTest, ProjectionShapesDoNotAffectTheDecision) {
     mixed.projection_columns = {"id"};
     mixed.has_computed_projection = true;
     expect_allowed(mixed);
-
-    // SELECT *, credit_card AS x FROM customers — a wildcard alongside an
-    // explicit column is structurally a single SELECT, so it is allowed here.
-    core::SqlAnalysis star_and_column = select_on({"customers"});
-    star_and_column.has_wildcard_projection = true;
-    star_and_column.projection_columns = {"credit_card"};
-    expect_allowed(star_and_column);
 }
 
 // --- Precedence (two meaningful pairs) ---------------------------------------

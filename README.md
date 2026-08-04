@@ -7,8 +7,9 @@ result set, masks it before anything is returned, and records an audit entry for
 Written in C++17. Developed on Linux.
 
 The service currently exposes only the health endpoint. The core now includes a tested SQL analysis
-component backed by a real SQL parser, a read-only access policy, and a PostgreSQL execution layer
-tested against a real database; none of them is connected to the HTTP service yet.
+component backed by a real SQL parser, a read-only access policy, a PostgreSQL execution layer tested
+against a real database, and PII classification of result columns; none of them is connected to the
+HTTP service yet.
 
 ## Planned request pipeline
 
@@ -85,7 +86,8 @@ The rule set is evaluated in a fixed order, first match wins:
 | 6–7 | DDL · DML | `DDL_NOT_ALLOWED` · `DML_NOT_ALLOWED` |
 | 8 | analyzer flagged an unsupported feature | `UNSUPPORTED_SQL_FEATURE` |
 | 9 | `pg_catalog.*`, `information_schema.*`, or a `pg_*` table | `SYSTEM_TABLE_ACCESS` |
-| 10 | otherwise: exactly one analyzed `SELECT` | **allowed** |
+| 10 | `SELECT *, col …` — mixed wildcard and explicit projection | `UNATTRIBUTABLE_PROJECTION` |
+| 11 | otherwise: exactly one analyzed `SELECT` | **allowed** |
 
 Rules 6 and 7 cover more than they appear to. `TRUNCATE` parses as an ordinary `DELETE`, so the DML
 rule is what keeps it out, and `CREATE TABLE … AS SELECT` parses as `CREATE`, so the DDL rule catches
@@ -105,9 +107,15 @@ unquoted identifiers while the parser preserves spelling. **The real enforcement
 PostgreSQL's own permission system**: run the service under a least-privilege, read-only role that
 has `SELECT` on exactly the tables it should read and nothing else.
 
-Rule 10 is structural, not a judgement about the result set: wildcards, aliases, computed projections
-and table-less selects are all allowed, because at this stage the question is only whether a single
-supported `SELECT` may run.
+Rule 10 exists because `SELECT *, credit_card AS x FROM customers` defeats *both* ways of attributing
+a result column to its source: the star breaks positional alignment, and the alias breaks name
+lookup. The aliased column would otherwise reach the caller unclassified, so the request is rejected
+before it runs. See [Data classification](#data-classification) for the two attribution modes.
+
+Rule 11 is deliberately permissive about projection shape: plain columns, aliases, wildcards,
+computed projections and table-less selects are all allowed. General computed projections
+(`UPPER(email)`, `COUNT(*)`) are **not** rejected by policy — the classifier marks them
+`Unattributed` instead.
 
 The engine is a pure function of its input — it never sees raw SQL text, execution results, or an
 identity, and it performs no authentication, no roles, and no per-user rules.
@@ -130,6 +138,70 @@ errors can echo connection details, so the returned error is assembled only from
 most a five-character SQLSTATE code — never driver text, SQL fragments, or the connection string.
 Tests force a syntax error and a unique-violation carrying a distinctive literal and assert that
 neither the literal nor any statement fragment appears in the error.
+
+## Data classification
+
+`DataClassifier` decides **what each result column carries**, not what to do about it. It produces a
+`ClassificationResult` with exactly one entry per result column, in result-column order.
+
+Classification is **metadata- and mapping-based**. The classifier receives the SQL analysis and the
+result set's *column metadata* — never a single cell value, never a row. Because no data enters it,
+no data can leak from it, and its unit tests construct nothing but an analysis and a column list.
+
+A small configured map drives it: `email → PII.Email`, `phone → PII.Phone`,
+`credit_card → PII.CreditCard`, matched case-insensitively. The map is constructor-injectable, so a
+differently named column can be classified without touching the schema. A config whose keys collide
+after normalization is refused at construction rather than silently resolved to one of them.
+
+Each column ends up in one of three states — three, deliberately, not two:
+
+| State | Meaning |
+|---|---|
+| `NotClassifiedAsPii` | examined, and not sensitive under the configured mapping |
+| `Pii` | carries one of the three categories |
+| `Unattributed` | **could not determine** what this column carries |
+
+`Unattributed` is the fail-closed default, and `fully_attributed` is false whenever any column holds
+it. Collapsing "not sensitive" into "unknown" is exactly the bug that would let unidentified data
+flow onward as if it had been checked.
+
+Two attribution modes:
+
+- **Positional** (plain or aliased explicit projections): result column *i* is attributed to
+  projection column *i*, with any qualifier stripped — `customers.email` and `c.email` both look up
+  `email`. This is what makes aliases useless as an evasion: `SELECT email AS contact` is still
+  classified from `email`, not from the result name `contact`.
+- **Wildcard** (`SELECT *` alone): the database returns the true source column names, so name lookup
+  is exact.
+
+Everything else — computed projections, projection/result count mismatches, and any analysis that is
+not a single successful `SELECT` — yields all columns `Unattributed`. The classifier never guesses a
+source column, never shifts indices, never classifies a partial prefix, and never quietly downgrades
+an unknown column to "not sensitive".
+
+Two details worth stating:
+
+- **Duplicate result column names are safe.** A join can produce two columns both named `email`;
+  classifications are stored **by index**, never in a name-keyed map that would collapse them.
+- **Joins are handled by column name only.** A qualifier in a projection is a table *alias* the
+  analysis cannot resolve back to a real table, so it is stripped and the bare column name is looked
+  up. Column-name-only mappings over-classify at worst, which is the safe direction.
+
+Policy rule 10 removes the one shape that would otherwise be ambiguous in a dangerous way — mixed
+wildcard and explicit projection — before execution. General computed projections are still allowed
+by policy and simply classify as `Unattributed`; what a later stage does with an unattributed column
+is not decided here.
+
+**Why not detect PII by inspecting values?** A regex scanner is wrong in both directions: a 16-digit
+order reference matches a card pattern, an unusually formatted phone number matches nothing, and
+per-row verdicts make column-level decisions incoherent (treat the column as sensitive because row 3
+matched?). Real products do value scanning with trained detectors, validators and review workflows; a
+quick regex imitates the feature while faking its reliability. The cost of this choice is real and
+stated plainly: **PII in an unmapped or misleadingly named column is invisible** — metadata-based
+classification cannot see that a `notes` column contains card numbers.
+
+Masking is not implemented yet. Classification decides *what* a column is; transforming values is a
+separate step, still to come.
 
 ## Prerequisites
 
@@ -252,7 +324,7 @@ $ curl -s localhost:8080/health
 Two executables. The unit tests need no database and never skip.
 
 ```bash
-# Unit tests — configuration, SQL analysis and policy
+# Unit tests — configuration, SQL analysis, policy and classification
 ./build/sql_proxy_unit_tests
 
 # Executor tests — REQUIRE a real PostgreSQL (see below)

@@ -21,6 +21,10 @@ enum class RejectReason {
     DdlNotAllowed,
     DmlNotAllowed,
     SystemTableAccess,
+    // Projection shapes that defeat both classification attribution modes.
+    // Produced ONLY for mixed wildcard+explicit projections
+    // (SELECT *, col ...); see the note on rule R10.
+    UnattributableProjection,
 };
 
 const char* to_string(RejectReason reason);

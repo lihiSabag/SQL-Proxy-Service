@@ -10,7 +10,7 @@ namespace core {
 // deterministic. Consumes only SqlAnalysis; returns only PolicyDecision.
 // Never sees raw SQL text, execution results, or identity.
 //
-// Rule order is fixed, first match wins (R1–R10 in policy_engine.cpp).
+// Rule order is fixed, first match wins (R1–R11 in policy_engine.cpp).
 // Rules R3/R4 are what uphold the IQueryExecutor single-statement
 // precondition — the executor deliberately refuses to count statements.
 class PolicyEngine {

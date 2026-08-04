@@ -102,9 +102,22 @@ PolicyDecision PolicyEngine::evaluate(const SqlAnalysis& analysis) const {
         }
     }
 
-    // R10 — exactly one fully analyzed SELECT. Wildcards, aliases, computed
-    // projections and table-less selects are all allowed: this gate is about
-    // statement structure, not about what the result set will contain.
+    // R10 — mixed wildcard + explicit projection, e.g.
+    // SELECT *, credit_card AS x FROM customers. Such a shape defeats BOTH
+    // classification attribution modes: the star breaks positional alignment
+    // and the alias breaks result-name lookup, so the explicit columns could
+    // reach the caller unclassified. Rejected before execution.
+    //
+    // Deliberately NOT extended to general computed projections
+    // (has_computed_projection && !tables.empty()); those remain allowed and
+    // are handled by the classifier, which marks them Unattributed.
+    if (analysis.has_wildcard_projection &&
+        !analysis.projection_columns.empty()) {
+        return reject(RejectReason::UnattributableProjection);
+    }
+
+    // R11 — exactly one fully analyzed SELECT. Wildcards, aliases, computed
+    // projections and table-less selects are allowed.
     return allow();
 }
 
