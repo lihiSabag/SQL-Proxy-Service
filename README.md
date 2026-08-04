@@ -501,7 +501,7 @@ Three executables. The first two need no database and never skip.
 # HTTP contract tests — request/response shapes, status codes, leak assertions
 ./build/sql_proxy_http_tests
 
-# Executor tests — REQUIRE a real PostgreSQL (see below)
+# Executor + end-to-end tests — REQUIRE a real PostgreSQL (see below)
 export TEST_DATABASE_URL="postgresql://sql_proxy_test_user@localhost:5432/sql_proxy_test"
 SQL_PROXY_TEST_DB_RESET=1 ./build/sql_proxy_integration_tests
 
@@ -526,3 +526,36 @@ SQL
 
 The executor tests write to their own tables, so this database must be separate from the one the
 service runs against.
+
+### End-to-end tests
+
+The end-to-end suite drives the **real** pipeline — real parser, real analysis, real policy, real
+PostgreSQL executor, real classifier, masker and JSONL audit — through the actual HTTP handler, with
+no fakes anywhere. Each test gets its own temporary directory and audit file and issues one request,
+so nothing carries between tests; both suites reset the schema and seed data at their first test, so
+neither depends on leftover database state or on running in a particular order.
+
+Every masked value is asserted exactly against the seeded data, including `NULL` versus the empty
+string and both card lengths. Audit lines are checked **structurally**, not by substring search: each
+line is parsed, its key set must match the closed schema for its outcome, forbidden keys must be
+absent, and every string value must be either a shape-checked UTC timestamp or a closed-vocabulary
+enum value. A substring sweep would be useless here, since legitimate audit content contains the
+strings `SELECT` and `pii_email_columns`.
+
+The end-to-end tests do not exercise `main.cpp`'s process wiring — configuration resolution,
+component construction and signal handling. Running the built binary directly covers that.
+
+## Known limitations
+
+- **A database execution failure returns `400`.** That is right for a genuinely malformed statement,
+  but a statement timeout is a server-side condition reported to the caller as if the request were at
+  fault. Distinguishing them would mean a coarse typed category from the executor, never a raw
+  SQLSTATE.
+- **Computed projections are refused, not masked.** `SELECT UPPER(email) …` and, as collateral,
+  `SELECT COUNT(*) …` and `SELECT 1` return `422`. The parser does not preserve the source column of
+  an expression, so the result column can be attributed by neither name nor position, and returning it
+  unmasked is not acceptable. Refusing is the fail-closed choice; the aggregate case is a real cost.
+- **PII in an unmapped or misleadingly named column is invisible** (see
+  [Data classification](#data-classification)).
+- **One request at a time** (see [Concurrency model](#concurrency-model)).
+- **Audit durability is process-level**, not crash-safe (see [Audit trail](#audit-trail)).

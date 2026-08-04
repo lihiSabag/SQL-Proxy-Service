@@ -169,8 +169,23 @@ set_tests_properties(sql_proxy_http_tests PROPERTIES LABELS "integration;http")
 # own label so the unit target stays database-free and never skips.
 add_executable(sql_proxy_integration_tests
     tests/integration/postgres_query_executor_test.cpp
+    tests/integration/end_to_end_test.cpp
     src/config/database_config.cpp
+    src/core/sql_analysis.cpp
+    src/core/sql_analyzer.cpp
+    src/core/policy_decision.cpp
+    src/core/policy_engine.cpp
+    src/core/data_classification.cpp
+    src/core/data_classifier.cpp
+    src/core/pii_masker.cpp
+    src/core/audit_record.cpp
+    src/core/service_result.cpp
+    src/core/proxy_service.cpp
+    src/logging/system_log.cpp
+    src/adapters/parser/hyrise_sql_parser.cpp
     src/adapters/postgres/postgres_query_executor.cpp
+    src/adapters/audit/jsonl_audit_repository.cpp
+    src/adapters/http/query_routes.cpp
 )
 
 target_include_directories(sql_proxy_integration_tests
@@ -188,7 +203,11 @@ target_link_libraries(sql_proxy_integration_tests
     PRIVATE
         GTest::gtest
         GTest::gtest_main
+        httplib::httplib
+        nlohmann_json::nlohmann_json
+        spdlog::spdlog
         libpqxx::pqxx
+        hsql_vendored
 )
 
 add_test(NAME sql_proxy_integration_tests COMMAND sql_proxy_integration_tests)
