@@ -8,8 +8,8 @@ Written in C++17. Developed on Linux.
 
 The service currently exposes only the health endpoint. The core now includes a tested SQL analysis
 component backed by a real SQL parser, a read-only access policy, a PostgreSQL execution layer tested
-against a real database, and PII classification of result columns; none of them is connected to the
-HTTP service yet.
+against a real database, and PII classification and masking of result columns; none of them is
+connected to the HTTP service yet.
 
 ## Planned request pipeline
 
@@ -200,8 +200,63 @@ quick regex imitates the feature while faking its reliability. The cost of this 
 stated plainly: **PII in an unmapped or misleadingly named column is invisible** — metadata-based
 classification cannot see that a `notes` column contains card numbers.
 
-Masking is not implemented yet. Classification decides *what* a column is; transforming values is a
-separate step, still to come.
+Classification decides *what* a column is; masking decides how it is transformed.
+
+## PII masking
+
+`PiiMasker` transforms values **only** according to the classification it is given. It never
+re-classifies; a value is inspected solely to apply the already-chosen transformation, so a `notes`
+column containing an email address is returned untouched.
+
+| Category | Rule | Example |
+|---|---|---|
+| `PII.Email` | keep the first character and the domain | `lihi.roas@example.com` → `l***@example.com` |
+| `PII.Phone` | 7+ digits → `***` + last four, formatting discarded | `0501230101` → `***0101` |
+| `PII.CreditCard` | 12+ digits → `****` + last four | `4111111111111111` → `****1111` |
+
+Across all three: **`NULL` stays `NULL`** and **`""` stays `""`** — masking transforms values, it
+does not fabricate them; turning a `NULL` card into `***` would assert that a customer has a card
+when the truthful answer is "none recorded". Every other non-empty value **always changes**; anything
+malformed falls back to `***` rather than passing through.
+
+Two deliberate trade-offs:
+
+- **The email domain is preserved.** `l***@example.com` is the industry-familiar format and keeps
+  output readable, but a domain can identify a person at a small organization. Masking the domain as
+  well is a one-line change if that risk matters more than legibility.
+- **Phones are masked partially.** The last four digits are what a support workflow realistically
+  needs; full redaction is the alternative.
+
+Card numbers are masked to a uniform width, so a 15-digit Amex and a 16-digit Visa are
+indistinguishable in the output — the masked form leaks neither length nor network. There is no Luhn
+check: validating a value would be classification by another name, and classification is already
+settled by then.
+
+**A masking call either returns a fully masked result or no result at all.** `MaskingOutcome` is
+success-or-failure by type: a failure cannot carry a result, so partially masked data is not
+representable. It cannot be default-constructed either — a default would masquerade as a success the
+masker never produced. Reading the wrong side of an outcome throws rather than returning something
+plausible.
+
+Masking runs in two phases. Phase one validates everything — column counts, every row's width, the
+classification invariants — before a single cell is touched. Phase two is total for validated input:
+it works by column **index**, so duplicate column names are irrelevant, and column order, row order,
+result shape and column metadata all pass through unchanged.
+
+An `Unattributed` column is refused, not redacted:
+
+| Failure | Meaning |
+|---|---|
+| `UNATTRIBUTED_COLUMN` | classification could not account for every column — the expected fail-closed outcome |
+| `STRUCTURAL_MISMATCH` | shapes do not line up |
+| `INVALID_CLASSIFICATION` | classification invariants are broken |
+
+Refusing rather than blanket-redacting is deliberate: a column nobody could identify should not be
+returned at all, and it should not be *value*-inspected in a last-minute attempt to identify it.
+
+Two properties worth stating plainly. The masker contains **no logging** — it is the one component
+guaranteed to hold raw PII. And **idempotence is not claimed**: there is no already-masked detection,
+because the pipeline invariant is that masking happens exactly once.
 
 ## Prerequisites
 
@@ -324,7 +379,7 @@ $ curl -s localhost:8080/health
 Two executables. The unit tests need no database and never skip.
 
 ```bash
-# Unit tests — configuration, SQL analysis, policy and classification
+# Unit tests — configuration, SQL analysis, policy, classification and masking
 ./build/sql_proxy_unit_tests
 
 # Executor tests — REQUIRE a real PostgreSQL (see below)
