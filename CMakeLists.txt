@@ -11,6 +11,35 @@ find_package(nlohmann_json CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(GTest CONFIG REQUIRED)
 
+# hyrise/sql-parser is fetched at a pinned commit. Upstream ships no
+# CMakeLists.txt, so the library target is declared here over its sources.
+# bison_parser.cpp / flex_lexer.cpp are pre-generated and committed upstream —
+# no bison/flex needed to build this.
+include(FetchContent)
+FetchContent_Declare(
+    hyrise_sql_parser
+    GIT_REPOSITORY https://github.com/hyrise/sql-parser.git
+    GIT_TAG        ccd3f68b50bb2b96ce69afa7b956b3bd826643cc
+)
+FetchContent_MakeAvailable(hyrise_sql_parser)
+
+set(HSQL_SRC ${hyrise_sql_parser_SOURCE_DIR}/src)
+
+add_library(hsql_vendored STATIC
+    ${HSQL_SRC}/SQLParser.cpp
+    ${HSQL_SRC}/SQLParserResult.cpp
+    ${HSQL_SRC}/parser/bison_parser.cpp
+    ${HSQL_SRC}/parser/flex_lexer.cpp
+    ${HSQL_SRC}/sql/CreateStatement.cpp
+    ${HSQL_SRC}/sql/Expr.cpp
+    ${HSQL_SRC}/sql/PrepareStatement.cpp
+    ${HSQL_SRC}/sql/SQLStatement.cpp
+    ${HSQL_SRC}/sql/statements.cpp
+    ${HSQL_SRC}/util/sqlhelper.cpp
+)
+target_include_directories(hsql_vendored SYSTEM PUBLIC ${HSQL_SRC})
+target_compile_options(hsql_vendored PRIVATE -w)
+
 enable_testing()
 
 add_executable(sql_proxy_service
@@ -36,9 +65,11 @@ target_link_libraries(sql_proxy_service
 add_executable(sql_proxy_unit_tests
     tests/core/server_config_test.cpp
     tests/core/sql_analyzer_test.cpp
+    tests/core/sql_parser_contract_test.cpp
     src/config/server_config.cpp
     src/core/sql_analysis.cpp
     src/core/sql_analyzer.cpp
+    src/adapters/parser/hyrise_sql_parser.cpp
 )
 
 target_include_directories(sql_proxy_unit_tests
@@ -51,6 +82,7 @@ target_link_libraries(sql_proxy_unit_tests
     PRIVATE
         GTest::gtest
         GTest::gtest_main
+        hsql_vendored
 )
 
 add_test(NAME sql_proxy_unit_tests COMMAND sql_proxy_unit_tests)

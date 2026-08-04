@@ -7,7 +7,7 @@ result set, masks it before anything is returned, and records an audit entry for
 Written in C++17. Developed on Linux.
 
 The service currently exposes only the health endpoint. The core now includes a tested SQL analysis
-component; it is not connected to the HTTP service yet.
+component backed by a real SQL parser; it is not connected to the HTTP service yet.
 
 ## Planned request pipeline
 
@@ -28,8 +28,40 @@ HTTP request
 the statement type and class, statement count, referenced tables, projection columns, wildcard and
 computed-projection flags, and features it could not model.
 
-The analyzer depends on the `ISqlParser` interface rather than a specific parser library. No parser
-adapter is included yet, so the unit tests use a hand-written fake.
+The analyzer depends on the `ISqlParser` interface rather than a specific parser library.
+
+## SQL parsing
+
+Parsing uses [`hyrise/sql-parser`](https://github.com/hyrise/sql-parser), pinned to a specific
+commit and vendored through CMake `FetchContent`. It gives a real AST for the statement types
+supported by the proxy — `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER`, `DROP` — and it
+reports multi-statement input, which a proxy has to be able to see. It ships pre-generated parser
+and lexer sources, so **bison/flex are not needed to build it**.
+
+The parser sits behind the `ISqlParser` interface, and `HyriseSqlParser` is the only place `hsql::`
+types appear. Everything downstream, starting with `SqlAnalyzer`, sees only the project's own
+`ParsedStatement`, so the parser library can be swapped without touching the analysis, and the
+analyzer can be tested against a hand-written fake.
+
+**Parse errors are sanitized.** A rejected statement produces an error built only from fixed text
+plus a line and column number — never the parser's own message, and never a fragment of the
+submitted SQL. A test forces a syntax error on input containing a distinctive literal and asserts
+the literal does not appear in the error.
+
+**Analysis is best-effort, and the design assumes that.** Where the analyzer knows its picture is
+incomplete, it reports that explicitly so later stages can decide how to handle it. Known
+limitations:
+
+- `ALTER TABLE … ADD COLUMN` does not parse (the parser supports `DROP COLUMN` only). Unsupported
+  ALTER syntax becomes a sanitized parse error.
+- Identifier case is preserved exactly as parsed. The parser neither case-folds unquoted
+  identifiers nor reports whether an identifier was quoted, so PostgreSQL-accurate case
+  normalization is impossible here.
+- Tables referenced only inside a `WHERE`-clause or projection subquery are invisible to the table
+  list. CTEs, set operations and `FROM`-subqueries are flagged as unsupported features.
+- `SELECT … FOR UPDATE` parses as a plain `SELECT`; the locking clause is not surfaced.
+- Statements outside the supported set (for example `SHOW`) parse successfully but map to the
+  `Unknown` statement type.
 
 ## Prerequisites
 
@@ -46,6 +78,8 @@ Dependencies come from vcpkg in manifest mode (`vcpkg.json`):
 ```bash
 git clone https://github.com/microsoft/vcpkg ~/vcpkg && ~/vcpkg/bootstrap-vcpkg.sh
 ```
+
+`hyrise/sql-parser` is fetched by CMake at a pinned commit; it is not a vcpkg dependency.
 
 ## Build
 
