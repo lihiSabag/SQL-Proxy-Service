@@ -4,11 +4,74 @@ A SQL proxy that will sit between users and PostgreSQL: it receives SQL statemen
 API, analyzes them, enforces an access policy, executes the ones it allows, classifies PII in the
 result set, masks it before anything is returned, and records an audit entry for each request.
 
-Written in C++17. Developed on Linux.
+Written in C++17. Developed on Linux. Runs natively or through Docker Compose.
 
 The pipeline is now wired end to end: `POST /query` analyzes the statement, applies the read-only
 policy, executes what it allows against PostgreSQL, classifies and masks PII in the result, and
 records the outcome in the audit trail before responding.
+
+## Quick start with Docker Compose
+
+Brings up PostgreSQL (schema and seed data applied automatically) and the service. No local
+toolchain, no database setup, no `.env` needed.
+
+```bash
+docker compose up --build -d
+docker compose ps
+curl -s http://localhost:8080/health
+```
+
+`docker compose ps` should show `postgres` as `healthy`; the health endpoint returns
+`{"status":"ok"}`.
+
+A query that demonstrates masking against the seeded data:
+
+```bash
+curl -s -XPOST http://localhost:8080/query \
+     -H 'Content-Type: application/json' \
+     -d '{"sql":"SELECT * FROM customers ORDER BY id"}'
+```
+```json
+{"columns":["id","name","email","phone","credit_card"],
+ "row_count":4,
+ "rows":[["1","Lihi Roas","l***@example.com","***0101","****1111"],
+         ["2","Kim Perez","k***@example.org","***0102","****4444"],
+         ["3","Daniel Mizrahi","d***@example.net",null,"****0009"],
+         ["4","Yael Azulay","y***@example.com","",null]]}
+```
+
+Email, phone and credit card are masked; `name` is not PII under the configured mapping; SQL `NULL`
+stays `null` and an empty string stays `""`.
+
+The audit trail is written to a named Docker volume:
+
+```bash
+docker compose exec sql-proxy cat /var/lib/sql-proxy/audit.jsonl
+```
+
+Stopping:
+
+```bash
+docker compose down      # stop, keep the database and audit history
+docker compose down -v   # also remove the demo database and audit history
+```
+
+> **Re-seeding.** `sql/schema.sql` and `sql/seed.sql` run only when the database volume is empty, on
+> first initialization. If you already have a `pgdata` volume from an earlier run, the seed data will
+> not be refreshed — use `docker compose down -v` to force a clean re-seed.
+
+> **First build.** A clean `--no-cache` build takes roughly **5 minutes**, because every C++
+> dependency is compiled from source by vcpkg. Later builds reuse the cached dependency layer and are
+> far faster.
+
+> **Port already in use?** If something else is listening on 8080, set `PORT` before running — in
+> `.env` or in the shell, e.g. `PORT=8081 docker compose up --build -d` — and use the same port in
+> the `curl` commands.
+
+> **Demo credentials.** The Compose stack uses synthetic values (`sqlproxy` /
+> `sqlproxy_demo_password`) injected through the container environment. They are for local
+> demonstration only — **do not reuse them in a real environment.** See
+> [Configuration](#configuration).
 
 ## Request pipeline
 
@@ -327,6 +390,9 @@ audit record together, from every path, and there is exactly one call site that 
 
 ## Prerequisites
 
+Two supported paths: **Docker Compose** (no local toolchain — see
+[Quick start](#quick-start-with-docker-compose)) or a **native build** with the toolchain below.
+
 Developed on **Ubuntu 24.04, g++ 13, CMake 3.28, PostgreSQL 16**.
 
 ```bash
@@ -413,8 +479,21 @@ All configuration is environment variables. Errors name the variable, never its 
 Startup fails fast with a clear message and exit code 1 if `DATABASE_URL` is missing or another value
 is invalid. Errors name the variable, never its value.
 
-**Keep the password out of `DATABASE_URL`.** Put it in `~/.pgpass` (mode `600`) and omit it from the
-URL, so it never appears in your shell history, the process list, or the environment:
+**The service reads these from the process environment (`getenv`) and never parses a `.env` file
+itself.** Docker Compose optionally reads `.env` and passes values into the container; a native run
+does not, so export them yourself:
+
+```bash
+set -a; . ./.env; set +a     # or export each variable individually
+```
+
+`.env.example` documents every variable. Copying it is **optional** — `docker-compose.yml` carries
+the same synthetic defaults inline, so the demo runs without creating `.env` at all.
+
+### Credentials: native vs Docker
+
+**Native — keep the password out of `DATABASE_URL`.** Put it in `~/.pgpass` (mode `600`) and omit it
+from the URL, so it never appears in your shell history, the process list, or the environment:
 
 ```
 localhost:5432:sql_proxy:sql_proxy_user:change-me
@@ -422,6 +501,13 @@ localhost:5432:sql_proxy:sql_proxy_user:change-me
 ```bash
 export DATABASE_URL="postgresql://sql_proxy_user@localhost:5432/sql_proxy"
 ```
+
+**Docker Compose — a synthetic demo credential is injected through the container environment.** This
+is a deliberate trade-off: baking a `.pgpass` file into the image or bind-mounting a host-specific
+one would tie the image to one machine and put a credential file inside a distributable artifact. The
+Compose credential is **synthetic, for local demonstration only, and must not be reused in a real
+environment.** For a real deployment neither applies: inject the credential from a secrets manager
+and keep it out of the image, the compose file, and the repository.
 
 ## Running
 

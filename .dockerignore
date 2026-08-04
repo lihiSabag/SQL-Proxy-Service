@@ -1,0 +1,43 @@
+# Keep the build context minimal and free of local, generated, or internal
+# material. Only vcpkg.json, CMakeLists.txt, src/ and tests/ are needed to
+# build the service (tests/ because CMake validates that the test sources
+# listed in add_executable() exist at configure time).
+
+# Version control and local tooling
+.git/
+.gitignore
+.gitattributes
+.vscode/
+.idea/
+
+# Build output and dependency caches
+build/
+build-*/
+out/
+cmake-build-*/
+vcpkg_installed/
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+_deps/
+
+# Documentation: not needed to compile the service
+README.md
+
+# Runtime output and local environment
+.env
+*.jsonl
+*.log
+audit*.jsonl
+
+# Docker files themselves (not needed inside the context)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Editor and OS noise
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

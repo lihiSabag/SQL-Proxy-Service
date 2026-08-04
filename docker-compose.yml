@@ -1,0 +1,65 @@
+# Local demonstration stack: PostgreSQL + the SQL proxy.
+#
+# Works from a fresh clone with no setup:
+#
+#     docker compose up --build
+#
+# Every variable below has a synthetic default, so .env is optional. Copy
+# .env.example to .env only to override them.
+#
+# THE DEFAULT CREDENTIALS ARE SYNTHETIC AND FOR LOCAL DEMONSTRATION ONLY.
+# Do not reuse them in any real environment.
+
+services:
+  postgres:
+    # Pinned to the same 16.14 the native test suite runs against, so the
+    # containerized and native paths exercise identical server behaviour.
+    image: postgres:16.14
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sqlproxy}
+      POSTGRES_USER: ${POSTGRES_USER:-sqlproxy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sqlproxy_demo_password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Numbered so the execution order is explicit rather than incidental.
+      # These run only when the data volume is empty (first initialization);
+      # use `docker compose down -v` to force a re-seed.
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./sql/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    healthcheck:
+      test:
+        ["CMD-SHELL",
+         "pg_isready -U ${POSTGRES_USER:-sqlproxy} -d ${POSTGRES_DB:-sqlproxy}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  sql-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # The host must be the Compose SERVICE NAME (postgres), not localhost:
+      # each container has its own network namespace, so localhost inside this
+      # container is this container. Compose's embedded DNS resolves service
+      # names on the shared project network.
+      #
+      # The demo password is injected here rather than via a .pgpass file:
+      # baking a host-specific credential file into the image would be worse.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sqlproxy}:${POSTGRES_PASSWORD:-sqlproxy_demo_password}@postgres:5432/${POSTGRES_DB:-sqlproxy}
+      PORT: ${PORT:-8080}
+      AUDIT_LOG_PATH: /var/lib/sql-proxy/audit.jsonl
+      DB_STATEMENT_TIMEOUT_MS: ${DB_STATEMENT_TIMEOUT_MS:-5000}
+    ports:
+      - "${PORT:-8080}:${PORT:-8080}"
+    volumes:
+      - audit:/var/lib/sql-proxy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  audit:

@@ -37,5 +37,9 @@ vcpkg_installed/
 .DS_Store
 Thumbs.db
 
-# Environment
+# Environment (.env.example is committed; .env is not)
 .env
+
+# Runtime audit output
+audit.jsonl
+audit*.jsonl
