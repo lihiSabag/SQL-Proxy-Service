@@ -25,6 +25,15 @@ nlohmann::json serialize(const core::AuditRecord& record) {
 
     switch (record.outcome()) {
         case core::AuditOutcome::Success: {
+            // Two shapes share this outcome. A write has no result set, so it
+            // records affected_rows and omits the read-only counts entirely
+            // rather than writing zeros that would read as a real measurement.
+            if (record.is_write_success()) {
+                const core::WriteSuccessDetails& w = record.write_success_details();
+                j["statement_type"] = core::to_string(w.statement_type);
+                j["affected_rows"] = w.affected_rows;
+                break;
+            }
             const core::SuccessDetails& d = record.success_details();
             j["statement_type"] = core::to_string(d.statement_type);
             j["row_count"] = d.row_count;

@@ -261,6 +261,137 @@ TEST(SqlParserContract, InsertWithoutColumnListDegradesGracefully) {
     EXPECT_TRUE(contains_note(stmt, "INSERT without column list"));
 }
 
+// === INSERT source form and VALUES literal kinds ===========================
+//
+// The facts the write policy is built on. The negative cases matter most:
+// each asserts that a near-miss is reported as something the policy cannot
+// authorize. Several shapes never reach the adapter at all because the
+// grammar refuses them, and those are pinned separately below so a parser
+// upgrade cannot quietly start accepting them.
+
+using Kind = core::InsertValueKind;
+using Kinds = std::vector<core::InsertValueKind>;
+
+TEST(SqlParserContract, InsertValuesReportsSourceAndLiteralKinds) {
+    auto result = parse("INSERT INTO orders (customer_id, amount) VALUES (1, 199.90)");
+    const auto& stmt = only_statement(result);
+    EXPECT_EQ(stmt.type, core::StatementType::Insert);
+    EXPECT_EQ(stmt.insert_source, core::InsertSource::Values);
+    ASSERT_EQ(stmt.tables.size(), 1u);
+    EXPECT_EQ(stmt.tables[0].schema, "");
+    EXPECT_EQ(stmt.tables[0].name, "orders");
+    EXPECT_EQ(stmt.affected_columns, std::vector<std::string>({"customer_id", "amount"}));
+    EXPECT_EQ(stmt.insert_value_kinds,
+              Kinds({Kind::PositiveIntegerLiteral, Kind::PositiveDecimalLiteral}));
+}
+
+TEST(SqlParserContract, InsertIntegerAmountIsAPositiveIntegerLiteral) {
+    auto result = parse("INSERT INTO orders (customer_id, amount) VALUES (1, 100)");
+    EXPECT_EQ(only_statement(result).insert_value_kinds,
+              Kinds({Kind::PositiveIntegerLiteral, Kind::PositiveIntegerLiteral}));
+}
+
+TEST(SqlParserContract, InsertSelectIsReportedAsASelectSource) {
+    // The table list of a copying insert is identical to a permitted one, so
+    // the source form is the only fact that separates them.
+    auto result = parse("INSERT INTO orders (customer_id, amount) "
+                        "SELECT id, 100 FROM customers");
+    const auto& stmt = only_statement(result);
+    EXPECT_EQ(stmt.insert_source, core::InsertSource::Select);
+    EXPECT_TRUE(stmt.insert_value_kinds.empty());
+    ASSERT_EQ(stmt.tables.size(), 1u);
+    EXPECT_EQ(stmt.tables[0].name, "orders");  // source table is NOT recorded
+}
+
+TEST(SqlParserContract, InsertZeroLiteralsAreNonPositive) {
+    EXPECT_EQ(only_statement(parse(
+                  "INSERT INTO orders (customer_id, amount) VALUES (0, 100)"))
+                  .insert_value_kinds[0],
+              Kind::NonPositiveNumericLiteral);
+    EXPECT_EQ(only_statement(parse(
+                  "INSERT INTO orders (customer_id, amount) VALUES (1, 0.0)"))
+                  .insert_value_kinds[1],
+              Kind::NonPositiveNumericLiteral);
+}
+
+TEST(SqlParserContract, InsertNegativeValuesAreNotLiteralsAtAll) {
+    // A negative number parses as a negation operator wrapping a literal, so
+    // it is Unsupported rather than NonPositiveNumericLiteral.
+    for (const char* sql : {"INSERT INTO orders (customer_id, amount) VALUES (1, -10)",
+                            "INSERT INTO orders (customer_id, amount) VALUES (1, -1.5)",
+                            "INSERT INTO orders (customer_id, amount) VALUES (-1, 100)"}) {
+        SCOPED_TRACE(sql);
+        auto result = parse(sql);
+        const auto& kinds = only_statement(result).insert_value_kinds;
+        ASSERT_EQ(kinds.size(), 2u);
+        EXPECT_TRUE(kinds[0] == Kind::Unsupported || kinds[1] == Kind::Unsupported);
+    }
+}
+
+TEST(SqlParserContract, InsertNonNumericValuesAreUnsupported) {
+    EXPECT_EQ(only_statement(parse(
+                  "INSERT INTO orders (customer_id, amount) VALUES (1, NULL)"))
+                  .insert_value_kinds[1],
+              Kind::Unsupported);
+    EXPECT_EQ(only_statement(parse(
+                  "INSERT INTO orders (customer_id, amount) VALUES (1, '100')"))
+                  .insert_value_kinds[1],
+              Kind::Unsupported);
+}
+
+TEST(SqlParserContract, InsertStringLiteralTextNeverLeavesTheAdapter) {
+    // The literal's text lives in the AST node, and nothing copies it out.
+    const std::string secret = "zzq-canary-9137@example.com";
+    auto result = parse("INSERT INTO customers (name, email) VALUES ('Noa', '" +
+                        secret + "')");
+    const auto& stmt = only_statement(result);
+    EXPECT_EQ(stmt.insert_value_kinds, Kinds({Kind::Unsupported, Kind::Unsupported}));
+    for (const std::string& table : {stmt.tables[0].schema, stmt.tables[0].name}) {
+        EXPECT_EQ(table.find(secret), std::string::npos);
+    }
+    for (const std::string& column : stmt.affected_columns) {
+        EXPECT_EQ(column.find(secret), std::string::npos);
+    }
+    for (const std::string& feature : stmt.unsupported_features) {
+        EXPECT_EQ(feature.find(secret), std::string::npos);
+    }
+}
+
+TEST(SqlParserContract, InsertIdentifierSpellingIsPreservedVerbatim) {
+    // Case is not folded, and a schema qualifier is kept, so the policy can
+    // compare exactly and refuse anything that is not the canonical name.
+    auto upper = parse("INSERT INTO ORDERS (CUSTOMER_ID, AMOUNT) VALUES (1, 100)");
+    EXPECT_EQ(only_statement(upper).tables[0].name, "ORDERS");
+    EXPECT_EQ(only_statement(upper).affected_columns,
+              std::vector<std::string>({"CUSTOMER_ID", "AMOUNT"}));
+
+    auto qualified = parse("INSERT INTO public.orders (customer_id, amount) VALUES (1, 100)");
+    EXPECT_EQ(only_statement(qualified).tables[0].schema, "public");
+
+    auto mixed = parse("INSERT INTO \"Orders\" (customer_id, amount) VALUES (1, 100)");
+    EXPECT_EQ(only_statement(mixed).tables[0].name, "Orders");
+}
+
+TEST(SqlParserContract, InsertShapesTheGrammarRefusesOutright) {
+    // Pins parser-version assumptions: each of these is a parse error today,
+    // and the write policy relies on never seeing them. If a parser upgrade
+    // starts accepting one, this fails instead of silently widening the
+    // authorized surface.
+    for (const char* sql : {
+             "INSERT INTO orders (customer_id, amount) VALUES (1, 100), (2, 200)",
+             "INSERT INTO orders (customer_id, amount) VALUES (1, 100) RETURNING *",
+             "INSERT INTO orders (customer_id, amount) VALUES (1, DEFAULT)",
+             "INSERT INTO orders (customer_id, amount) VALUES (1, random() * 100)",
+             "INSERT INTO orders (customer_id, amount) VALUES (1, 100 + 1)",
+             "INSERT INTO orders (customer_id, amount) VALUES ((SELECT id FROM customers), 1)",
+             "INSERT INTO orders (customer_id, amount) VALUES (1, CAST(100 AS NUMERIC))",
+             "INSERT INTO orders (customer_id, amount) VALUES (1, 100) ON CONFLICT DO NOTHING",
+         }) {
+        SCOPED_TRACE(sql);
+        EXPECT_FALSE(parse(sql).success);
+    }
+}
+
 TEST(SqlParserContract, UpdateSetTargets) {
     auto result = parse("UPDATE customers SET phone = 'x' WHERE id = 1");
     const auto& stmt = only_statement(result);

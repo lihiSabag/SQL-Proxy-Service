@@ -98,6 +98,18 @@ void handle_query_request(core::ProxyService& proxy, const httplib::Request& req
         return;
     }
 
+    // An authorized write returns no rows or columns, only how many rows
+    // changed. 200 keeps the single-endpoint contract: 201 would need a
+    // Location the proxy cannot produce (RETURNING is never allowed, so the
+    // new id is unknown), and 204 would discard the one useful fact.
+    if (result.is_write()) {
+        const nlohmann::json write_body{
+            {"affected_rows", result.write_result().affected_rows}};
+        response.status = 200;
+        response.set_content(write_body.dump(), "application/json");
+        return;
+    }
+
     const core::MaskedQueryResult& masked = result.result();
     nlohmann::json rows = nlohmann::json::array();
     for (const auto& row : masked.rows) {

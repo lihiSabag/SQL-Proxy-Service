@@ -35,15 +35,36 @@ const char* to_string(DbFailureCategory category) {
 
 namespace {
 
-// Success, DatabaseFailure, and MaskingRefused are reachable only for
-// SELECT under the read-only policy. Enforced here
-// as a factory contract; revisit explicitly if DML is ever allowed.
+// Success (with a result set) and MaskingRefused are reachable only for
+// SELECT: both describe a classified, masked result, which a write never
+// produces. Enforced here as a factory contract.
 void require_select(StatementType type, const char* factory) {
     if (type != StatementType::Select) {
         throw std::invalid_argument(
             std::string(factory) +
-            " audit records require StatementType::Select under the "
-            "read-only policy");
+            " audit records require StatementType::Select: they describe a "
+            "masked result set");
+    }
+}
+
+// A write outcome is reachable only for INSERT, the single statement type
+// the policy may authorize as a write.
+void require_insert(StatementType type, const char* factory) {
+    if (type != StatementType::Insert) {
+        throw std::invalid_argument(
+            std::string(factory) +
+            " audit records require StatementType::Insert: it is the only "
+            "authorized write");
+    }
+}
+
+// Execution can fail on either path, so the failure record accepts both.
+void require_select_or_insert(StatementType type, const char* factory) {
+    if (type != StatementType::Select && type != StatementType::Insert) {
+        throw std::invalid_argument(
+            std::string(factory) +
+            " audit records require StatementType::Select or "
+            "StatementType::Insert");
     }
 }
 
@@ -60,6 +81,13 @@ AuditRecord AuditRecord::success(std::int64_t timestamp_ms,
                                  SuccessDetails details) {
     require_select(details.statement_type, "success");
     return AuditRecord(timestamp_ms, request_id, Details(std::move(details)));
+}
+
+AuditRecord AuditRecord::write_success(std::int64_t timestamp_ms,
+                                       std::uint64_t request_id,
+                                       WriteSuccessDetails details) {
+    require_insert(details.statement_type, "write_success");
+    return AuditRecord(timestamp_ms, request_id, Details(details));
 }
 
 AuditRecord AuditRecord::parsing_failure(std::int64_t timestamp_ms,
@@ -90,7 +118,7 @@ AuditRecord AuditRecord::policy_rejected(std::int64_t timestamp_ms,
 AuditRecord AuditRecord::database_failure(std::int64_t timestamp_ms,
                                           std::uint64_t request_id,
                                           DatabaseFailureDetails details) {
-    require_select(details.statement_type, "database_failure");
+    require_select_or_insert(details.statement_type, "database_failure");
     return AuditRecord(timestamp_ms, request_id, Details(details));
 }
 
@@ -110,7 +138,10 @@ AuditRecord AuditRecord::internal_failure(std::int64_t timestamp_ms,
 AuditOutcome AuditRecord::outcome() const {
     // Derived from the active alternative — never stored, so it can never
     // contradict the details.
-    if (std::holds_alternative<SuccessDetails>(details_)) {
+    // Both success alternatives report the same outcome: the request was
+    // authorized and completed. Which one is active decides the fields.
+    if (std::holds_alternative<SuccessDetails>(details_) ||
+        std::holds_alternative<WriteSuccessDetails>(details_)) {
         return AuditOutcome::Success;
     }
     if (std::holds_alternative<ParsingFailureDetails>(details_)) {
@@ -128,8 +159,16 @@ AuditOutcome AuditRecord::outcome() const {
     return AuditOutcome::InternalFailure;
 }
 
+bool AuditRecord::is_write_success() const {
+    return std::holds_alternative<WriteSuccessDetails>(details_);
+}
+
 const SuccessDetails& AuditRecord::success_details() const {
     return std::get<SuccessDetails>(details_);
+}
+
+const WriteSuccessDetails& AuditRecord::write_success_details() const {
+    return std::get<WriteSuccessDetails>(details_);
 }
 
 const PolicyRejectedDetails& AuditRecord::policy_rejected_details() const {

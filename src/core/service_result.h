@@ -18,6 +18,12 @@ struct MaskedQueryResult {
     std::vector<std::vector<std::optional<std::string>>> rows;
 };
 
+// The outcome of an authorized write. No result set exists, so the only
+// thing to report is how many rows changed.
+struct WriteResult {
+    std::size_t affected_rows = 0;
+};
+
 // Coarse, client-safe failure vocabulary. Deliberately NOT RejectReason or
 // AuditOutcome: the audit trail records the precise reason, while the client
 // sees only a category — every policy denial except empty input is
@@ -44,17 +50,24 @@ public:
     ServiceResult() = delete;
 
     static ServiceResult success(MaskedQueryResult result);
+    static ServiceResult write_success(WriteResult result);
     static ServiceResult failure(ServiceFailure failure);
 
     bool succeeded() const;
 
+    // True for a completed write, which carries no rows or columns. Callers
+    // must check this before reaching for result(): the two successes have
+    // different shapes and neither can be read as the other.
+    bool is_write() const;
+
     // Valid only in the matching state; wrong-state access throws
     // std::bad_variant_access and can never silently yield data.
     const MaskedQueryResult& result() const;
+    const WriteResult& write_result() const;
     ServiceFailure failure_reason() const;
 
 private:
-    using Value = std::variant<MaskedQueryResult, ServiceFailure>;
+    using Value = std::variant<MaskedQueryResult, WriteResult, ServiceFailure>;
     explicit ServiceResult(Value value);
 
     Value value_;

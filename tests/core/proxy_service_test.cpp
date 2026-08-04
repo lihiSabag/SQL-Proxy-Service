@@ -275,6 +275,106 @@ TEST(ProxyServiceTest, SafeCountStarSucceedsAndAuditsZeroPiiColumns) {
     EXPECT_EQ(record.success_details().pii.credit_card_columns, 0u);
 }
 
+// --- The authorized write -----------------------------------------------------
+
+namespace {
+
+ports::ParseResult parsed_order_insert() {
+    ports::ParseResult parse;
+    parse.success = true;
+    parse.statements.resize(1);
+    parse.statements[0].type = core::StatementType::Insert;
+    parse.statements[0].tables = {{"", "orders"}};
+    parse.statements[0].affected_columns = {"customer_id", "amount"};
+    parse.statements[0].insert_source = core::InsertSource::Values;
+    parse.statements[0].insert_value_kinds = {
+        core::InsertValueKind::PositiveIntegerLiteral,
+        core::InsertValueKind::PositiveDecimalLiteral};
+    return parse;
+}
+
+ports::ExecutionResult write_result(long long affected_rows) {
+    ports::ExecutionResult result;
+    result.status = ports::ExecutionStatus::Ok;
+    result.has_result_set = false;   // no columns, no rows
+    result.affected_rows = affected_rows;
+    return result;
+}
+
+}  // namespace
+
+TEST(ProxyServiceTest, AuthorizedInsertReturnsAffectedRowsAndIsAudited) {
+    FakeParserHarness h;
+    h.parser->result_to_return = parsed_order_insert();
+    h.executor.result_to_return = write_result(1);
+
+    const core::ServiceResult result =
+        h.service->handle("INSERT INTO orders (customer_id, amount) VALUES (1, 199.90)");
+
+    ASSERT_TRUE(result.succeeded());
+    ASSERT_TRUE(result.is_write());
+    EXPECT_EQ(result.write_result().affected_rows, 1u);
+    // A write carries no result set, and the two shapes are not confusable.
+    EXPECT_THROW(result.result(), std::bad_variant_access);
+
+    const core::AuditRecord& record = only_record(h.audit);
+    EXPECT_EQ(record.outcome(), core::AuditOutcome::Success);
+    ASSERT_TRUE(record.is_write_success());
+    EXPECT_EQ(record.write_success_details().statement_type, core::StatementType::Insert);
+    EXPECT_EQ(record.write_success_details().affected_rows, 1u);
+}
+
+TEST(ProxyServiceTest, InsertAffectingOtherThanOneRowIsAnInternalFailure) {
+    for (long long affected : {0LL, 2LL}) {
+        FakeParserHarness h;
+        h.parser->result_to_return = parsed_order_insert();
+        h.executor.result_to_return = write_result(affected);
+
+        const core::ServiceResult result =
+            h.service->handle("INSERT INTO orders (customer_id, amount) VALUES (1, 1)");
+
+        EXPECT_FALSE(result.succeeded());
+        EXPECT_EQ(result.failure_reason(), core::ServiceFailure::InternalError);
+        EXPECT_EQ(only_record(h.audit).outcome(), core::AuditOutcome::InternalFailure);
+    }
+}
+
+TEST(ProxyServiceTest, RejectedInsertNeverReachesTheExecutor) {
+    FakeParserHarness h;
+    ports::ParseResult parse = parsed_order_insert();
+    parse.statements[0].tables = {{"", "customers"}};  // wrong target
+    h.parser->result_to_return = parse;
+
+    const core::ServiceResult result =
+        h.service->handle("INSERT INTO customers (customer_id, amount) VALUES (1, 1)");
+
+    EXPECT_FALSE(result.succeeded());
+    EXPECT_EQ(result.failure_reason(), core::ServiceFailure::PolicyRejected);
+    EXPECT_EQ(h.executor.received_sql().size(), 0u);  // nothing was executed
+    const core::AuditRecord& record = only_record(h.audit);
+    EXPECT_EQ(record.outcome(), core::AuditOutcome::PolicyRejected);
+    EXPECT_EQ(record.policy_rejected_details().reason,
+              core::RejectReason::InsertTargetNotAllowed);
+}
+
+TEST(ProxyServiceTest, InsertExecutionFailureIsAuditedAsADatabaseFailure) {
+    FakeParserHarness h;
+    h.parser->result_to_return = parsed_order_insert();
+    ports::ExecutionResult failed;
+    failed.status = ports::ExecutionStatus::ExecutionFailure;  // e.g. FK violation
+    h.executor.result_to_return = failed;
+
+    const core::ServiceResult result =
+        h.service->handle("INSERT INTO orders (customer_id, amount) VALUES (999, 1)");
+
+    EXPECT_FALSE(result.succeeded());
+    EXPECT_EQ(result.failure_reason(), core::ServiceFailure::QueryFailed);
+    const core::AuditRecord& record = only_record(h.audit);
+    EXPECT_EQ(record.outcome(), core::AuditOutcome::DatabaseFailure);
+    EXPECT_EQ(record.database_failure_details().statement_type,
+              core::StatementType::Insert);
+}
+
 // --- Unexpected failures ------------------------------------------------------
 
 TEST(ProxyServiceTest, UnexpectedParserExceptionBecomesInternalFailure) {

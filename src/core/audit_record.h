@@ -51,6 +51,17 @@ struct SuccessDetails {
     PiiSummary pii;
 };
 
+// A completed write. Carries no result-set counts (there is none) and no
+// PII counts (nothing was classified or masked). affected_rows is the one
+// fact worth recording: it says how much changed. No table name is stored:
+// under the current policy an allowed write is always the one permitted
+// target, so the name adds nothing, and on any other path it would be
+// caller-controlled text.
+struct WriteSuccessDetails {
+    StatementType statement_type;  // must be Insert under the current policy
+    std::size_t affected_rows = 0;
+};
+
 // Deliberately empty: a parse failure produced no reliable analysis, and
 // the record must not invent certainty the analyzer never had.
 struct ParsingFailureDetails {};
@@ -100,6 +111,9 @@ public:
 
     static AuditRecord success(std::int64_t timestamp_ms,
                                std::uint64_t request_id, SuccessDetails details);
+    static AuditRecord write_success(std::int64_t timestamp_ms,
+                                     std::uint64_t request_id,
+                                     WriteSuccessDetails details);
     static AuditRecord parsing_failure(std::int64_t timestamp_ms,
                                        std::uint64_t request_id,
                                        ParsingFailureDetails details = {});
@@ -117,19 +131,24 @@ public:
                                         InternalFailureDetails details = {});
 
     AuditOutcome outcome() const;
+
+    // Distinguishes the two alternatives that share AuditOutcome::Success:
+    // a masked result set versus a completed write.
+    bool is_write_success() const;
     std::int64_t timestamp_ms() const { return timestamp_ms_; }
     std::uint64_t request_id() const { return request_id_; }
 
     // Wrong-state access throws std::bad_variant_access — a detail can
     // never be silently read from a record of a different outcome.
     const SuccessDetails& success_details() const;
+    const WriteSuccessDetails& write_success_details() const;
     const PolicyRejectedDetails& policy_rejected_details() const;
     const DatabaseFailureDetails& database_failure_details() const;
     const MaskingRefusedDetails& masking_refused_details() const;
 
 private:
     using Details =
-        std::variant<SuccessDetails, ParsingFailureDetails,
+        std::variant<SuccessDetails, WriteSuccessDetails, ParsingFailureDetails,
                      PolicyRejectedDetails, DatabaseFailureDetails,
                      MaskingRefusedDetails, InternalFailureDetails>;
 

@@ -80,6 +80,8 @@ SqlAnalysis SqlAnalyzer::analyze(const std::string& sql) const {
     analysis.has_safe_count_star_projection = statement.has_safe_count_star_projection;
     analysis.has_group_by = statement.has_group_by;
     analysis.affected_columns = statement.affected_columns;
+    analysis.insert_source = statement.insert_source;
+    analysis.insert_value_kinds = statement.insert_value_kinds;
     analysis.unsupported_features = statement.unsupported_features;
     return analysis;
 }

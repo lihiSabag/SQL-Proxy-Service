@@ -79,14 +79,15 @@ The service supports a bounded SQL subset. SQL that cannot be understood confide
 
 **Why?**
 
-The service does not implement authentication, user identity, roles, or write authorization. Without a trusted identity, it cannot determine whether a caller should be allowed to modify database contents.
+The service does not implement authentication, user identity, or roles. Without a trusted identity it cannot decide whether a caller may modify data in general, so writes are refused as a class rather than authorized case by case.
 
 **Implementation**
 
-The proxy follows a strict read-only policy:
+The proxy is read-only apart from one explicitly enumerated write:
 
 - supported single-statement `SELECT` queries may proceed;
-- DDL and DML are rejected before execution;
+- one exact `INSERT` shape may proceed (see below);
+- all other DML, and every DDL statement, are rejected before execution;
 - multiple statements are rejected;
 - unsupported statement types and features are rejected;
 - system-catalog access is rejected;
@@ -94,11 +95,29 @@ The proxy follows a strict read-only policy:
 
 Policy decisions use typed rejection reasons rather than free-form strings.
 
-The PostgreSQL account should also use a least-privilege, read-only role. The application policy is one layer of protection, not a replacement for database permissions.
+**The single permitted write**
+
+```sql
+INSERT INTO orders (customer_id, amount) VALUES (1, 199.90);
+```
+
+It is authorized only when every one of these holds: exactly one statement, target table exactly `orders` unqualified, an explicit column list of exactly `customer_id` then `amount` in that order, a `VALUES` source, and two values that are a positive integer literal and a positive numeric literal. Identifier comparison is exact and case-sensitive, stricter than the read path, so a write is refused whenever the target is not spelled canonically.
+
+Everything else stays rejected, including `INSERT ... SELECT`, multiple rows, `RETURNING`, `DEFAULT`, functions, arithmetic, subqueries, an omitted column list, reordered or duplicated columns, zero and negative values, a qualified name such as `public.orders`, and any casing other than the canonical one. `UPDATE`, `DELETE` and `TRUNCATE` are unaffected.
+
+`INSERT ... SELECT` is rejected on its source form rather than its table list, because the current parser model records only the target table and its table list is therefore indistinguishable from a permitted insert's.
+
+An authorized insert returns `200` with `{"affected_rows": 1}` and no result set. Every rejected write returns the same generic `403` as any other policy denial, so the rule set cannot be mapped by probing; the precise reason is kept in the audit trail only. A foreign-key or constraint failure returns `400` with no constraint name or value.
+
+If the database reports success but an affected-row count other than one, the service reports an internal failure (`500`). This check runs only after the transaction has committed and indicates that the database behaved outside the assumptions of the proxy policy, for example because of a trigger or rewrite rule.
+
+Because the parser strips quotes without reporting them, `INSERT INTO "orders"` cannot be distinguished from the unquoted form. Both forms resolve to the same relation, so this does not expand the permitted write surface. Qualified names such as `public."orders"` and differently cased identifiers such as `"Orders"` remain rejected.
+
+The PostgreSQL account should also use a least-privilege role, granted `SELECT` on the tables it reads plus column-level `INSERT` on exactly `orders(customer_id, amount)`. The application policy is one layer of protection, not a replacement for database permissions.
 
 **Trade-off**
 
-The policy intentionally sacrifices write capabilities in exchange for a smaller and safer authorization model. This prevents the proxy from becoming a route for accidental or malicious data modification.
+Allowing one write shape rather than general `INSERT` support keeps the authorization rule small enough to read in full, at the cost of rejecting statements that are harmless in practice, such as `COUNT(1)`-style equivalents of the permitted form. Business limits on the value itself stay in the database schema, where `NUMERIC(10,2)` and the foreign key already enforce them.
 
 ### Classification logic
 
@@ -238,6 +257,29 @@ The schema contains `customers` and `orders`. The dataset covers:
 
 All stored card numbers are publicly documented, non-transactable test values.
 
+### Least-privilege database role
+
+The proxy's own policy is one layer; database privileges are the boundary that holds if it is bypassed. Grant the service role only what the two supported capabilities need:
+
+```sql
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM sql_proxy_user;
+
+-- Reads
+GRANT SELECT ON customers, orders TO sql_proxy_user;
+
+-- The single permitted write, restricted to two columns
+GRANT INSERT (customer_id, amount) ON orders TO sql_proxy_user;
+
+-- orders.id is a SERIAL, so its sequence must be usable by the insert
+GRANT USAGE ON SEQUENCE orders_id_seq TO sql_proxy_user;
+```
+
+`USAGE` on the sequence permits `nextval` only, not `setval`, and it is required: without it an authorized insert fails at runtime even though the policy allowed it.
+
+Not granted: `UPDATE`, `DELETE`, `TRUNCATE`, any DDL, `INSERT` on `customers`, and `INSERT` on `orders.id` or `orders.created_at`. Under these grants the role cannot modify an existing row anywhere, and cannot write to `customers` at all, whatever the proxy decides.
+
+These statements are valid on PostgreSQL 16 and the sequence name is the one `orders.id` uses, but the resulting privilege set has not been exercised end to end: the development database has no role with `CREATEROLE`, so no restricted role was available to run the suite against. Verify these grants under a genuinely restricted role before relying on them as an enforcement boundary.
+
 ## Quick start
 
 Requirements:
@@ -313,7 +355,9 @@ The test suites cover:
 - Identifier normalization follows a simplified ASCII case model rather than full PostgreSQL identifier semantics.
 - Requests are currently processed serially, and each execution opens a short-lived database connection.
 - Audit writes are flushed, but host-crash durability through `fsync` is not guaranteed.
-- Authentication, authorization, and role-aware policy are not implemented.
+- Authentication, authorization, and role-aware policy are not implemented. The audit trail records that an order insert happened, not who requested it, which is a sharper gap for a write than for a read.
+- The permitted insert is not idempotent. Submitting it twice creates two orders; duplicate suppression would need a caller-supplied key.
+- A quoted `"orders"` cannot be distinguished from the unquoted form, because the parser strips quotes without reporting them. Both resolve to the same relation, so no extra access is granted.
 - A statement timeout is currently reported as HTTP 400 together with other execution failures.
 
 ### Predicate inference

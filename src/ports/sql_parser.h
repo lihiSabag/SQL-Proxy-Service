@@ -46,6 +46,13 @@ struct ParsedStatement {
     // what it means; the adapter itself draws no conclusion from it.
     bool has_group_by = false;
     std::vector<std::string> affected_columns;  // INSERT/UPDATE only
+
+    // INSERT only. The source form, and one kind per VALUES entry in written
+    // order. Kinds are syntactic facts about the literal nodes: no numeric
+    // magnitude and no string payload is copied out of the AST.
+    core::InsertSource insert_source = core::InsertSource::None;
+    std::vector<core::InsertValueKind> insert_value_kinds;
+
     std::vector<std::string> unsupported_features;
 };
 

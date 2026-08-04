@@ -113,6 +113,41 @@ TEST(SqlAnalyzer, SafeCountStarAndGroupByDefaultToFalse) {
     EXPECT_FALSE(analysis.has_group_by);
 }
 
+TEST(SqlAnalyzer, InsertSourceAndValueKindsPropagate) {
+    AnalyzerFixture f;
+    ports::ParsedStatement stmt;
+    stmt.type = core::StatementType::Insert;
+    stmt.tables = {{"", "orders"}};
+    stmt.affected_columns = {"customer_id", "amount"};
+    stmt.insert_source = core::InsertSource::Values;
+    stmt.insert_value_kinds = {core::InsertValueKind::PositiveIntegerLiteral,
+                               core::InsertValueKind::PositiveDecimalLiteral};
+    f.fake->result_to_return = single_statement(std::move(stmt));
+
+    auto analysis = f.analyzer.analyze("INSERT INTO orders (customer_id, amount) VALUES (1, 2.5)");
+
+    EXPECT_EQ(analysis.status, core::AnalysisStatus::Ok);
+    EXPECT_EQ(analysis.insert_source, core::InsertSource::Values);
+    EXPECT_EQ(analysis.insert_value_kinds,
+              std::vector<core::InsertValueKind>(
+                  {core::InsertValueKind::PositiveIntegerLiteral,
+                   core::InsertValueKind::PositiveDecimalLiteral}));
+    EXPECT_EQ(analysis.tables, std::vector<std::string>({"orders"}));
+}
+
+TEST(SqlAnalyzer, InsertFactsDefaultFailClosedForNonInserts) {
+    AnalyzerFixture f;
+    ports::ParsedStatement stmt;
+    stmt.type = core::StatementType::Select;
+    stmt.projection_columns = {"id"};
+    f.fake->result_to_return = single_statement(std::move(stmt));
+
+    auto analysis = f.analyzer.analyze("SELECT id FROM customers");
+
+    EXPECT_EQ(analysis.insert_source, core::InsertSource::None);
+    EXPECT_TRUE(analysis.insert_value_kinds.empty());
+}
+
 TEST(SqlAnalyzer, MixedPlainAndComputedProjection) {
     AnalyzerFixture f;
     ports::ParsedStatement stmt;

@@ -98,6 +98,38 @@ protected:
     std::unique_ptr<core::ProxyService> service;
 };
 
+// --- Write response shape -----------------------------------------------------
+
+TEST_F(HttpQueryTest, AuthorizedInsertReturnsAffectedRowsWithoutAResultSet) {
+    ports::ParseResult parse;
+    parse.success = true;
+    parse.statements.resize(1);
+    parse.statements[0].type = core::StatementType::Insert;
+    parse.statements[0].tables = {{"", "orders"}};
+    parse.statements[0].affected_columns = {"customer_id", "amount"};
+    parse.statements[0].insert_source = core::InsertSource::Values;
+    parse.statements[0].insert_value_kinds = {
+        core::InsertValueKind::PositiveIntegerLiteral,
+        core::InsertValueKind::PositiveDecimalLiteral};
+    parser->result_to_return = parse;
+
+    ports::ExecutionResult executed;
+    executed.status = ports::ExecutionStatus::Ok;
+    executed.affected_rows = 1;
+    executor.result_to_return = executed;
+
+    const httplib::Response response = post(
+        R"json({"sql":"INSERT INTO orders (customer_id, amount) VALUES (1, 199.90)"})json");
+
+    EXPECT_EQ(response.status, 200);
+    const nlohmann::json body = body_of(response);
+    EXPECT_EQ(body["affected_rows"], 1);
+    // A write response carries no result-set fields at all.
+    EXPECT_FALSE(body.contains("rows"));
+    EXPECT_FALSE(body.contains("columns"));
+    EXPECT_FALSE(body.contains("row_count"));
+}
+
 // --- Success shape ------------------------------------------------------------
 
 TEST_F(HttpQueryTest, SuccessfulQueryReturnsPositionalRowsWithMaskedValues) {

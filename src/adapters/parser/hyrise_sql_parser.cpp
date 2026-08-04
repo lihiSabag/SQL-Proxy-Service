@@ -155,6 +155,24 @@ void translate_select(const hsql::SelectStatement& stmt, ports::ParsedStatement&
     }
 }
 
+// One VALUES entry, described as a syntactic fact. Only ival/fval are read,
+// and only to compare against zero; the comparison result is kept and the
+// number itself is discarded. A string literal's text (Expr::name) is never
+// read, so no user-controlled text can leave the adapter.
+core::InsertValueKind classify_insert_value(const hsql::Expr& e) {
+    switch (e.type) {
+        case hsql::kExprLiteralInt:
+            return e.ival > 0 ? core::InsertValueKind::PositiveIntegerLiteral
+                              : core::InsertValueKind::NonPositiveNumericLiteral;
+        case hsql::kExprLiteralFloat:
+            return e.fval > 0.0 ? core::InsertValueKind::PositiveDecimalLiteral
+                                : core::InsertValueKind::NonPositiveNumericLiteral;
+        default:
+            // Strings, NULL, negation operators, column refs, subqueries.
+            return core::InsertValueKind::Unsupported;
+    }
+}
+
 void translate_insert(const hsql::InsertStatement& stmt, ports::ParsedStatement& out) {
     out.type = core::StatementType::Insert;
     out.tables.push_back({copy_or_empty(stmt.schema), copy_or_empty(stmt.tableName)});
@@ -164,6 +182,20 @@ void translate_insert(const hsql::InsertStatement& stmt, ports::ParsedStatement&
         }
     } else {
         out.unsupported_features.push_back(kNoteInsertWithoutColumns);
+    }
+
+    // The source form is reported for every INSERT. It is the only fact that
+    // separates a copying insert from a literal one: INSERT ... SELECT
+    // records just its target table, so its table list looks the same as a
+    // plain insert's.
+    out.insert_source = stmt.type == hsql::kInsertSelect ? core::InsertSource::Select
+                                                         : core::InsertSource::Values;
+    if (out.insert_source == core::InsertSource::Values && stmt.values != nullptr) {
+        for (const hsql::Expr* value : *stmt.values) {
+            out.insert_value_kinds.push_back(
+                value == nullptr ? core::InsertValueKind::Unsupported
+                                 : classify_insert_value(*value));
+        }
     }
 }
 

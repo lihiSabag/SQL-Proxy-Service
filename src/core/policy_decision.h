@@ -25,6 +25,13 @@ enum class RejectReason {
     // Produced ONLY for mixed wildcard+explicit projections
     // (SELECT *, col ...); see the note on rule R10.
     UnattributableProjection,
+    // INSERT into anything other than the single permitted target table.
+    InsertTargetNotAllowed,
+    // An INSERT into the permitted target whose shape or values are outside
+    // the one authorized form. One reason and not several: every denial is
+    // externally indistinguishable anyway, so a finer split would only
+    // record which check failed.
+    UnsupportedInsertShape,
 };
 
 const char* to_string(RejectReason reason);

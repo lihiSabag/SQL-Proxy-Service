@@ -130,4 +130,48 @@ TEST(AuditRecordTest, SelectOnlyFactoriesRejectNonSelect) {
                  std::invalid_argument);
 }
 
+TEST(AuditRecordTest, WriteSuccessCarriesAffectedRowsAndReportsSuccess) {
+    const core::AuditRecord record =
+        core::AuditRecord::write_success(1700000000000, 7,
+                                         {core::StatementType::Insert, 1});
+
+    EXPECT_EQ(record.outcome(), core::AuditOutcome::Success);
+    EXPECT_TRUE(record.is_write_success());
+    EXPECT_EQ(record.write_success_details().affected_rows, 1u);
+    EXPECT_EQ(record.write_success_details().statement_type,
+              core::StatementType::Insert);
+    // The two success shapes are not interchangeable.
+    EXPECT_THROW(record.success_details(), std::bad_variant_access);
+}
+
+TEST(AuditRecordTest, WriteSuccessRequiresInsertAndReadSuccessStaysSelectOnly) {
+    for (core::StatementType type :
+         {core::StatementType::Select, core::StatementType::Update,
+          core::StatementType::Delete, core::StatementType::Drop}) {
+        EXPECT_THROW(core::AuditRecord::write_success(1, 1, {type, 1}),
+                     std::invalid_argument);
+    }
+
+    // A masked-result success is still SELECT-only.
+    core::SuccessDetails read = valid_success();
+    read.statement_type = core::StatementType::Insert;
+    EXPECT_THROW(core::AuditRecord::success(1, 1, read), std::invalid_argument);
+
+    // A read success is not a write success.
+    const core::AuditRecord select_record = core::AuditRecord::success(1, 1, valid_success());
+    EXPECT_FALSE(select_record.is_write_success());
+    EXPECT_THROW(select_record.write_success_details(), std::bad_variant_access);
+}
+
+TEST(AuditRecordTest, DatabaseFailureAcceptsBothAuthorizedStatementTypes) {
+    EXPECT_NO_THROW(core::AuditRecord::database_failure(
+        1, 1, {core::DbFailureCategory::ExecutionFailure, core::StatementType::Insert}));
+    EXPECT_NO_THROW(core::AuditRecord::database_failure(
+        1, 1, {core::DbFailureCategory::ConnectionFailure, core::StatementType::Select}));
+    EXPECT_THROW(core::AuditRecord::database_failure(
+                     1, 1,
+                     {core::DbFailureCategory::ExecutionFailure, core::StatementType::Update}),
+                 std::invalid_argument);
+}
+
 }  // namespace

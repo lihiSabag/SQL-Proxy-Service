@@ -30,16 +30,29 @@ ServiceResult ServiceResult::success(MaskedQueryResult result) {
     return ServiceResult(Value(std::move(result)));
 }
 
+ServiceResult ServiceResult::write_success(WriteResult result) {
+    return ServiceResult(Value(result));
+}
+
 ServiceResult ServiceResult::failure(ServiceFailure failure) {
     return ServiceResult(Value(failure));
 }
 
 bool ServiceResult::succeeded() const {
-    return std::holds_alternative<MaskedQueryResult>(value_);
+    // Anything that is not a failure is a success; there are two shapes.
+    return !std::holds_alternative<ServiceFailure>(value_);
+}
+
+bool ServiceResult::is_write() const {
+    return std::holds_alternative<WriteResult>(value_);
 }
 
 const MaskedQueryResult& ServiceResult::result() const {
     return std::get<MaskedQueryResult>(value_);
+}
+
+const WriteResult& ServiceResult::write_result() const {
+    return std::get<WriteResult>(value_);
 }
 
 ServiceFailure ServiceResult::failure_reason() const {

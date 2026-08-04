@@ -124,6 +124,27 @@ ProxyService::Processing ProxyService::process(const std::string& sql,
                  analysis.statement_type})};
     }
 
+    // An authorized write produces no result set, so classification and
+    // masking do not apply and are skipped rather than run on an empty
+    // result. Policy admits exactly one write shape, so StatementType is
+    // enough to identify it here.
+    if (analysis.statement_type == StatementType::Insert) {
+        const std::size_t affected =
+            checked_count(execution.affected_rows, "affected_rows");
+        if (affected != 1) {
+            // The one authorized shape inserts exactly one row. Any other
+            // count means the statement did something the policy did not
+            // authorize, so it is reported as an internal failure rather
+            // than as a success the service cannot vouch for.
+            return Processing{ServiceResult::failure(ServiceFailure::InternalError),
+                              AuditRecord::internal_failure(timestamp_ms, request_id)};
+        }
+        return Processing{
+            ServiceResult::write_success(WriteResult{affected}),
+            AuditRecord::write_success(timestamp_ms, request_id,
+                                       {analysis.statement_type, affected})};
+    }
+
     // Captured BEFORE the executor result is moved into the masker; the
     // moved-from object is never read again.
     const std::size_t row_count = checked_count(execution.row_count, "row_count");

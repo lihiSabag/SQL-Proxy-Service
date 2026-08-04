@@ -121,14 +121,34 @@ TEST(AuditSerializationTest, ZeroRowZeroPiiSuccessIsValid) {
     EXPECT_EQ(j["pii_email_columns"], 0);
 }
 
+TEST(AuditSerializationTest, WriteSuccessHasExactFields) {
+    const nlohmann::json j = audit_adapter::serialize(
+        core::AuditRecord::write_success(1700000000000, 9,
+                                         {core::StatementType::Insert, 1}));
+
+    EXPECT_EQ(j["outcome"], "SUCCESS");
+    EXPECT_EQ(j["statement_type"], "INSERT");
+    EXPECT_EQ(j["affected_rows"], 1);
+    EXPECT_EQ(j["request_id"], 9);
+    // A write has no result set, so the read-only counts are omitted rather
+    // than written as zeros that would read as a real measurement.
+    for (const char* absent : {"row_count", "column_count", "pii_email_columns",
+                               "pii_phone_columns", "pii_credit_card_columns",
+                               "reason", "category"}) {
+        EXPECT_FALSE(j.contains(absent)) << absent;
+    }
+}
+
 TEST(AuditSerializationTest, AllKeysStayInsideClosedSchema) {
     const std::set<std::string> allowed{
         "timestamp",         "request_id",       "outcome",
         "statement_type",    "row_count",        "column_count",
         "pii_email_columns", "pii_phone_columns", "pii_credit_card_columns",
-        "reason",            "statement_count",  "category"};
+        "reason",            "statement_count",  "category",
+        "affected_rows"};
     const std::vector<core::AuditRecord> records = {
         sample_success(),
+        core::AuditRecord::write_success(1, 6, {core::StatementType::Insert, 1}),
         core::AuditRecord::parsing_failure(1, 1),
         core::AuditRecord::policy_rejected(
             1, 2,

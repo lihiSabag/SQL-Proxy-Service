@@ -26,6 +26,10 @@ const char* to_string(RejectReason reason) {
             return "SYSTEM_TABLE_ACCESS";
         case RejectReason::UnattributableProjection:
             return "UNATTRIBUTABLE_PROJECTION";
+        case RejectReason::InsertTargetNotAllowed:
+            return "INSERT_TARGET_NOT_ALLOWED";
+        case RejectReason::UnsupportedInsertShape:
+            return "UNSUPPORTED_INSERT_SHAPE";
     }
     return "NOT_EVALUATED";
 }

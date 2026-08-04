@@ -120,10 +120,15 @@ const std::set<std::string>& forbidden_keys() {
     return keys;
 }
 
-std::set<std::string> expected_keys_for(const std::string& outcome) {
+// SUCCESS covers two shapes: a masked result set and a completed write. The
+// statement type tells them apart, and neither may carry the other's fields.
+std::set<std::string> expected_keys_for(const std::string& outcome,
+                                        const std::string& statement_type) {
     const std::set<std::string> envelope{"timestamp", "request_id", "outcome"};
     std::set<std::string> keys = envelope;
-    if (outcome == "SUCCESS") {
+    if (outcome == "SUCCESS" && statement_type == "INSERT") {
+        keys.insert({"statement_type", "affected_rows"});
+    } else if (outcome == "SUCCESS") {
         keys.insert({"statement_type", "row_count", "column_count",
                      "pii_email_columns", "pii_phone_columns",
                      "pii_credit_card_columns"});
@@ -187,7 +192,9 @@ void validate_audit_line(const Json& line) {
     for (auto it = line.begin(); it != line.end(); ++it) {
         actual_keys.insert(it.key());
     }
-    EXPECT_EQ(actual_keys, expected_keys_for(outcome))
+    const std::string statement_type =
+        line.contains("statement_type") ? line["statement_type"].get<std::string>() : "";
+    EXPECT_EQ(actual_keys, expected_keys_for(outcome, statement_type))
         << "audit schema drift for outcome " << outcome;
 
     for (const std::string& key : actual_keys) {
@@ -334,6 +341,21 @@ protected:
         const long long value = transaction.query_value<long long>(sql);
         transaction.commit();
         return value;
+    }
+
+    // Direct statement execution, used only to undo rows an insert test
+    // created so later tests still see the seeded data unchanged.
+    static void execute_directly(const std::string& sql) {
+        pqxx::connection connection(test_environment().url);
+        pqxx::work transaction(connection);
+        transaction.exec(sql);
+        transaction.commit();
+    }
+
+    // Removes anything an insert test added, restoring the seeded row set.
+    static void delete_orders_above(long long highest_seeded_id) {
+        execute_directly("DELETE FROM orders WHERE id > " +
+                         std::to_string(highest_seeded_id));
     }
 
     std::filesystem::path directory_;
@@ -724,6 +746,147 @@ TEST_F(EndToEndTest, ValueReturningAggregatesRemainRefusedAndLeakNothing) {
         EXPECT_EQ(response.body.find("4111"), std::string::npos);
         EXPECT_EQ(response.body.find("5555"), std::string::npos);
     }
+}
+
+// === The single authorized write ============================================
+//
+// Each test that inserts restores the seeded row set afterwards, so the rest
+// of the suite still sees exactly four orders.
+
+TEST_F(EndToEndTest, AuthorizedOrderInsertWritesOneRowAndIsAudited) {
+    const long long before = scalar("SELECT COUNT(*) FROM orders");
+    const long long highest = scalar("SELECT COALESCE(MAX(id), 0) FROM orders");
+
+    const httplib::Response response =
+        post("INSERT INTO orders (customer_id, amount) VALUES (1, 199.90)");
+
+    ASSERT_EQ(response.status, 200);
+    const Json body = body_of(response);
+    EXPECT_EQ(body["affected_rows"], 1);
+    EXPECT_FALSE(body.contains("rows"));
+    EXPECT_FALSE(body.contains("columns"));
+
+    EXPECT_EQ(scalar("SELECT COUNT(*) FROM orders"), before + 1);
+    EXPECT_EQ(scalar("SELECT COUNT(*) FROM orders WHERE customer_id = 1 "
+                     "AND amount = 199.90 AND id > " + std::to_string(highest)),
+              1);
+
+    const Json audit = only_audit_line();
+    EXPECT_EQ(audit["outcome"], "SUCCESS");
+    EXPECT_EQ(audit["statement_type"], "INSERT");
+    EXPECT_EQ(audit["affected_rows"], 1);
+    // No values, no table name, and none of the read-only counts.
+    for (const char* absent : {"row_count", "column_count", "pii_email_columns",
+                               "target_table", "reason"}) {
+        EXPECT_FALSE(audit.contains(absent)) << absent;
+    }
+
+    delete_orders_above(highest);
+}
+
+TEST_F(EndToEndTest, InsertedOrderIsReadableThroughTheProxy) {
+    const long long highest = scalar("SELECT COALESCE(MAX(id), 0) FROM orders");
+    ASSERT_EQ(post("INSERT INTO orders (customer_id, amount) VALUES (2, 12.34)").status, 200);
+
+    Pipeline reader = make_pipeline(database_config(), audit_path_);
+    const httplib::Response read =
+        post("SELECT amount FROM orders WHERE id > " + std::to_string(highest),
+             reader.service.get());
+
+    ASSERT_EQ(read.status, 200);
+    EXPECT_EQ(body_of(read)["rows"], Json::array({Json::array({"12.34"})}));
+
+    delete_orders_above(highest);
+}
+
+TEST_F(EndToEndTest, InsertWithUnknownCustomerFailsCleanlyAndWritesNothing) {
+    const long long before = scalar("SELECT COUNT(*) FROM orders");
+
+    // 999999 violates the foreign key on orders.customer_id.
+    const httplib::Response response =
+        post("INSERT INTO orders (customer_id, amount) VALUES (999999, 10.00)");
+
+    EXPECT_EQ(response.status, 400);
+    EXPECT_EQ(body_of(response)["error"], "query_failed");
+    // No constraint name, SQLSTATE, or value reaches the caller.
+    EXPECT_EQ(response.body.find("SQLSTATE"), std::string::npos);
+    EXPECT_EQ(response.body.find("999999"), std::string::npos);
+    EXPECT_EQ(response.body.find("customer_id"), std::string::npos);
+
+    EXPECT_EQ(scalar("SELECT COUNT(*) FROM orders"), before);  // rolled back
+
+    const Json audit = only_audit_line();
+    EXPECT_EQ(audit["outcome"], "DATABASE_FAILURE");
+    EXPECT_EQ(audit["statement_type"], "INSERT");
+    EXPECT_EQ(audit["category"], "EXECUTION_FAILURE");
+    EXPECT_FALSE(audit.contains("affected_rows"));
+}
+
+TEST_F(EndToEndTest, RejectedInsertShapesWriteNothingAndLeakNothing) {
+    const long long before_orders = scalar("SELECT COUNT(*) FROM orders");
+    const long long before_customers = scalar("SELECT COUNT(*) FROM customers");
+
+    for (const char* sql : {
+             // wrong target
+             "INSERT INTO customers (name, email) VALUES ('Noa', 'noa@example.com')",
+             // copying insert: same table list as the permitted shape
+             "INSERT INTO orders (customer_id, amount) SELECT id, 100 FROM customers",
+             // column-list variations
+             "INSERT INTO orders (amount, customer_id) VALUES (100, 1)",
+             "INSERT INTO orders (customer_id) VALUES (1)",
+             "INSERT INTO orders (customer_id, amount, id) VALUES (1, 100, 5)",
+             // omitted column list, reported as an unsupported feature
+             "INSERT INTO orders VALUES (99, 1, 100)",
+             // value variations
+             "INSERT INTO orders (customer_id, amount) VALUES (1, -10)",
+             "INSERT INTO orders (customer_id, amount) VALUES (0, 100)",
+             "INSERT INTO orders (customer_id, amount) VALUES (1, 0)",
+             "INSERT INTO orders (customer_id, amount) VALUES (1, NULL)",
+             "INSERT INTO orders (customer_id, amount) VALUES (1, '100')",
+             // identifier variations
+             "INSERT INTO public.orders (customer_id, amount) VALUES (1, 100)",
+             "INSERT INTO ORDERS (customer_id, amount) VALUES (1, 100)",
+             "INSERT INTO orders (CUSTOMER_ID, AMOUNT) VALUES (1, 100)",
+             // other writes
+             "UPDATE orders SET amount = 1 WHERE id = 1",
+             "DELETE FROM orders WHERE id = 1",
+             "TRUNCATE orders",
+             "DROP TABLE orders",
+         }) {
+        SCOPED_TRACE(sql);
+        Pipeline pipeline = make_pipeline(database_config(), audit_path_);
+        const httplib::Response response = post(sql, pipeline.service.get());
+
+        EXPECT_EQ(response.status, 403);
+        EXPECT_EQ(body_of(response)["error"], "policy_rejected");
+        // Every denial looks identical from outside, so the rule set cannot
+        // be mapped by probing.
+        EXPECT_EQ(response.body.find("orders"), std::string::npos);
+        EXPECT_EQ(response.body.find("noa@example.com"), std::string::npos);
+    }
+
+    EXPECT_EQ(scalar("SELECT COUNT(*) FROM orders"), before_orders);
+    EXPECT_EQ(scalar("SELECT COUNT(*) FROM customers"), before_customers);
+}
+
+TEST_F(EndToEndTest, InsertShapesTheParserRefusesAreBadRequests) {
+    const long long before = scalar("SELECT COUNT(*) FROM orders");
+
+    for (const char* sql : {
+             "INSERT INTO orders (customer_id, amount) VALUES (1, 100), (2, 200)",
+             "INSERT INTO orders (customer_id, amount) VALUES (1, 100) RETURNING *",
+             "INSERT INTO orders (customer_id, amount) VALUES (1, DEFAULT)",
+             "INSERT INTO orders (customer_id, amount) VALUES (1, random() * 100)",
+             "INSERT INTO orders (customer_id, amount) VALUES ((SELECT id FROM customers), 1)",
+         }) {
+        SCOPED_TRACE(sql);
+        Pipeline pipeline = make_pipeline(database_config(), audit_path_);
+        const httplib::Response response = post(sql, pipeline.service.get());
+        EXPECT_EQ(response.status, 400);
+        EXPECT_EQ(body_of(response)["error"], "invalid_sql");
+    }
+
+    EXPECT_EQ(scalar("SELECT COUNT(*) FROM orders"), before);
 }
 
 // === Database failures ======================================================
