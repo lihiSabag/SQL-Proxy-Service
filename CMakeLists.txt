@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(httplib CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(libpqxx CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(GTest CONFIG REQUIRED)
 
@@ -64,9 +65,11 @@ target_link_libraries(sql_proxy_service
 
 add_executable(sql_proxy_unit_tests
     tests/core/server_config_test.cpp
+    tests/core/database_config_test.cpp
     tests/core/sql_analyzer_test.cpp
     tests/core/sql_parser_contract_test.cpp
     src/config/server_config.cpp
+    src/config/database_config.cpp
     src/core/sql_analysis.cpp
     src/core/sql_analyzer.cpp
     src/adapters/parser/hyrise_sql_parser.cpp
@@ -87,3 +90,32 @@ target_link_libraries(sql_proxy_unit_tests
 
 add_test(NAME sql_proxy_unit_tests COMMAND sql_proxy_unit_tests)
 set_tests_properties(sql_proxy_unit_tests PROPERTIES LABELS "unit")
+
+# Executor tests against a real PostgreSQL. Kept in a separate target with its
+# own label so the unit target stays database-free and never skips.
+add_executable(sql_proxy_integration_tests
+    tests/integration/postgres_query_executor_test.cpp
+    src/config/database_config.cpp
+    src/adapters/postgres/postgres_query_executor.cpp
+)
+
+target_include_directories(sql_proxy_integration_tests
+    PRIVATE
+        src
+)
+
+# Lets the test fixture locate schema.sql / seed.sql in the source tree.
+target_compile_definitions(sql_proxy_integration_tests
+    PRIVATE
+        SQL_PROXY_SQL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/sql"
+)
+
+target_link_libraries(sql_proxy_integration_tests
+    PRIVATE
+        GTest::gtest
+        GTest::gtest_main
+        libpqxx::pqxx
+)
+
+add_test(NAME sql_proxy_integration_tests COMMAND sql_proxy_integration_tests)
+set_tests_properties(sql_proxy_integration_tests PROPERTIES LABELS "integration;postgres")

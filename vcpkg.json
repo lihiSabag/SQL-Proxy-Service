@@ -5,7 +5,14 @@
   "dependencies": [
     "cpp-httplib",
     "nlohmann-json",
+    "libpqxx",
     "spdlog",
     "gtest"
+  ],
+  "overrides": [
+    {
+      "name": "libpqxx",
+      "version": "7.10.1"
+    }
   ]
 }
