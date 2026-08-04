@@ -71,6 +71,8 @@ add_executable(sql_proxy_unit_tests
     tests/core/policy_engine_test.cpp
     tests/core/data_classifier_test.cpp
     tests/core/pii_masker_test.cpp
+    tests/core/audit_record_test.cpp
+    tests/core/jsonl_audit_repository_test.cpp
     src/config/server_config.cpp
     src/config/database_config.cpp
     src/core/sql_analysis.cpp
@@ -80,7 +82,9 @@ add_executable(sql_proxy_unit_tests
     src/core/data_classification.cpp
     src/core/data_classifier.cpp
     src/core/pii_masker.cpp
+    src/core/audit_record.cpp
     src/adapters/parser/hyrise_sql_parser.cpp
+    src/adapters/audit/jsonl_audit_repository.cpp
 )
 
 target_include_directories(sql_proxy_unit_tests
@@ -93,6 +97,7 @@ target_link_libraries(sql_proxy_unit_tests
     PRIVATE
         GTest::gtest
         GTest::gtest_main
+        nlohmann_json::nlohmann_json
         hsql_vendored
 )
 

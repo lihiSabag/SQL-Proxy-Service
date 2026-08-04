@@ -8,8 +8,8 @@ Written in C++17. Developed on Linux.
 
 The service currently exposes only the health endpoint. The core now includes a tested SQL analysis
 component backed by a real SQL parser, a read-only access policy, a PostgreSQL execution layer tested
-against a real database, and PII classification and masking of result columns; none of them is
-connected to the HTTP service yet.
+against a real database, PII classification and masking of result columns, and an audit trail for
+request outcomes; none of them is connected to the HTTP service yet.
 
 ## Planned request pipeline
 
@@ -258,6 +258,76 @@ Two properties worth stating plainly. The masker contains **no logging** — it 
 guaranteed to hold raw PII. And **idempotence is not claimed**: there is no already-masked detection,
 because the pipeline invariant is that masking happens exactly once.
 
+## Audit trail
+
+An `AuditRecord` describes one controlled request outcome. Records are written as one JSON object per
+line — JSON Lines — through the `IAuditRepository` port, implemented by `JsonlAuditRepository`:
+
+```json
+{"column_count":5,"outcome":"SUCCESS","pii_credit_card_columns":1,"pii_email_columns":1,"pii_phone_columns":1,"request_id":1,"row_count":4,"statement_type":"SELECT","timestamp":"2026-08-04T09:23:33.265Z"}
+{"outcome":"POLICY_REJECTED","reason":"DDL_NOT_ALLOWED","request_id":2,"statement_count":1,"statement_type":"DROP","timestamp":"2026-08-04T09:23:45.419Z"}
+{"outcome":"PARSING_FAILURE","request_id":3,"timestamp":"2026-08-04T09:23:45.424Z"}
+{"column_count":1,"outcome":"MASKING_REFUSED","request_id":5,"statement_type":"SELECT","timestamp":"2026-08-04T09:23:45.433Z"}
+{"category":"EXECUTION_FAILURE","outcome":"DATABASE_FAILURE","request_id":6,"statement_type":"SELECT","timestamp":"2026-08-04T09:23:45.454Z"}
+```
+
+**What is recorded, and why it is enough.** The questions an auditor actually asks are *what kind of
+statement was this, what did we decide, how much data was exposed, and was it masked* — so each
+record carries a UTC timestamp, a request id, the outcome, the statement type, and outcome-specific
+counts: rows and columns returned, and how many result **columns** (not cells) fell into each PII
+category. `SUCCESS` implies masking completed; `MASKING_REFUSED` implies it did not. Those facts are
+derived from the outcome rather than stored, so a record cannot contradict itself — the outcome is
+read from which detail alternative is present, and there is no separate field to disagree with it.
+
+**What is deliberately *not* recorded, and why.** No SQL text — raw, normalized, or hashed. No result
+values, masked or otherwise. No column, alias, table or schema names. No database or exception
+messages. No file paths, credentials, or connection strings. No user identity.
+
+This is the security decision the audit design turns on. **SQL text routinely embeds the very data
+the proxy exists to protect** — `WHERE email = 'lihi.roas@example.com'` would put PII into the audit
+log permanently, in a file that outlives the request and is read by more people than the result ever
+was. A hash does not fix it either: hashing preserves equality, so records become joinable by query,
+and short predictable statements fall to a dictionary attack that reconstructs the text.
+
+The guarantee is structural, not procedural: `AuditRecord` **has no free-form string field**. Its
+members are enums, integers and a timestamp, so SQL, values and names are not "filtered out" — they
+are unrepresentable. Even the failure vocabulary is a closed enum, so an I/O error cannot smuggle a
+path or an `errno` string into the trail.
+
+A record cannot be default-constructed; each outcome has its own factory, and the factories refuse
+combinations that would misdescribe the event: a parse failure is audited only as `PARSING_FAILURE`
+and never duplicated as a policy rejection, and outcomes reachable only for `SELECT` under the
+read-only policy insist on it. Reading the wrong detail type throws rather than returning something
+plausible.
+
+PII category counts are recorded **only for `SUCCESS`**. When masking is refused the classification
+was incomplete by definition, and a count such as `pii_email_columns: 0` for
+`SELECT CONCAT(name, email) …` would be precise, closed-vocabulary, and *misleading*.
+
+The JSONL adapter is the only place `nlohmann::json` appears in this part of the system. Objects are
+built through the JSON library rather than by string concatenation, field names are compile-time
+literals, enum values come from the closed `to_string` tables, and **inapplicable fields are omitted
+entirely** rather than written as null or zero placeholders. Timestamps are formatted as
+deterministic ISO-8601 UTC with milliseconds, in the adapter, so the core record model stays free of
+presentation concerns.
+
+**Durability, stated honestly.** Each record is written and flushed to the OS on append, and an
+instance mutex prevents interleaving between threads in one process. There is no `fsync`, no
+multi-process locking, and no recovery from a crash mid-write — a hard kill can cost the trailing
+line. The file is opened in append mode, created if missing, and never read back, so existing
+contents are preserved and malformed pre-existing lines never block new appends. Failures are
+reported as `OPEN_FAILURE` or `WRITE_FAILURE`, with no path and no OS text, and are not retried.
+
+**Audit is not application logging.** The system log narrates operations for whoever is running the
+service; the audit trail records outcomes for later review. Different audiences, different rules,
+different destinations.
+
+**Audit persistence is implemented, but nothing calls it yet.** Records can be built and appended, and
+the repository is tested directly, but no request path produces a record: the HTTP service still
+exposes only the health endpoint. Wiring the audit trail into request processing — including the rule
+that a successful result may leave the service *only* if its record was persisted — belongs to the
+orchestrator, which does not exist at this point.
+
 ## Prerequisites
 
 Developed on **Ubuntu 24.04, g++ 13, CMake 3.28, PostgreSQL 16**.
@@ -379,7 +449,7 @@ $ curl -s localhost:8080/health
 Two executables. The unit tests need no database and never skip.
 
 ```bash
-# Unit tests — configuration, SQL analysis, policy, classification and masking
+# Unit tests — configuration, SQL analysis, policy, classification, masking and audit
 ./build/sql_proxy_unit_tests
 
 # Executor tests — REQUIRE a real PostgreSQL (see below)
