@@ -219,6 +219,77 @@ TEST(DataClassifierTest, UnsupportedShapesAreUnattributed) {
     }
 }
 
+// === Canonical COUNT(*) attribution ========================================
+
+namespace {
+
+core::SqlAnalysis count_star_select() {
+    core::SqlAnalysis a = select_with_projection({});
+    a.has_safe_count_star_projection = true;
+    return a;
+}
+
+}  // namespace
+
+TEST(DataClassifierTest, CountStarOnlyProjectionIsNotPii) {
+    // A row count has no lineage to any source value.
+    const auto r = classifier.classify(count_star_select(), columns({"count"}));
+    ASSERT_EQ(r.columns.size(), 1u);
+    EXPECT_EQ(r.columns[0].data_class, core::ColumnDataClass::NotClassifiedAsPii);
+    EXPECT_TRUE(r.fully_attributed);
+    expect_invariants(r);
+}
+
+TEST(DataClassifierTest, MultipleCountStarsAreAllNotPii) {
+    const auto r = classifier.classify(count_star_select(),
+                                       columns({"count", "count"}));
+    ASSERT_EQ(r.columns.size(), 2u);
+    EXPECT_EQ(r.columns[0].data_class, core::ColumnDataClass::NotClassifiedAsPii);
+    EXPECT_EQ(r.columns[1].data_class, core::ColumnDataClass::NotClassifiedAsPii);
+    EXPECT_TRUE(r.fully_attributed);
+    expect_invariants(r);
+}
+
+TEST(DataClassifierTest, CountStarAliasedAsEmailIsStillNotPii) {
+    // SELECT COUNT(*) AS email: attribution is by SHAPE, so the mapping is
+    // never consulted and the alias cannot turn an integer into PII.
+    const auto r = classifier.classify(count_star_select(), columns({"email"}));
+    ASSERT_EQ(r.columns.size(), 1u);
+    EXPECT_EQ(r.columns[0].data_class, core::ColumnDataClass::NotClassifiedAsPii);
+    EXPECT_TRUE(r.fully_attributed);
+    expect_invariants(r);
+}
+
+TEST(DataClassifierTest, CountStarShapesThatMustStayUnattributed) {
+    // Grouped: one row per group, not one row for the whole input.
+    core::SqlAnalysis grouped = count_star_select();
+    grouped.has_group_by = true;
+
+    // Mixed with a plain column: SELECT COUNT(*), email
+    core::SqlAnalysis with_column = count_star_select();
+    with_column.projection_columns = {"email"};
+
+    // Mixed with a wildcard: SELECT COUNT(*), *
+    // Regression guard. Without the safe-count exclusion on wildcard_shape
+    // this would be classified by result-column name and silently succeed.
+    core::SqlAnalysis with_wildcard = count_star_select();
+    with_wildcard.has_wildcard_projection = true;
+
+    // Mixed with any other computed expression: SELECT COUNT(*), UPPER(email)
+    core::SqlAnalysis with_computed = count_star_select();
+    with_computed.has_computed_projection = true;
+
+    for (const core::SqlAnalysis* a :
+         {&grouped, &with_column, &with_wildcard, &with_computed}) {
+        const auto r = classifier.classify(*a, columns({"count", "email"}));
+        ASSERT_EQ(r.columns.size(), 2u);
+        EXPECT_EQ(r.columns[0].data_class, core::ColumnDataClass::Unattributed);
+        EXPECT_EQ(r.columns[1].data_class, core::ColumnDataClass::Unattributed);
+        EXPECT_FALSE(r.fully_attributed);
+        expect_invariants(r);
+    }
+}
+
 TEST(DataClassifierTest, EmptyResultColumnListIsEmptyAndFullyAttributed) {
     // No columns -> nothing to attribute -> vacuously fully attributed.
     const auto r = classifier.classify(select_with_projection({"email"}),

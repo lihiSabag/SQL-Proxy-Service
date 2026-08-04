@@ -619,6 +619,113 @@ TEST_F(EndToEndTest, SelectLiteralIsCurrentlyRefused_DocumentedLimitation) {
     EXPECT_EQ(only_audit_line()["outcome"], "MASKING_REFUSED");
 }
 
+// === Canonical COUNT(*) =====================================================
+//
+// The one computed shape that is executed and returned. Everything else in
+// the COUNT family, and every mixed projection containing one, stays refused.
+
+TEST_F(EndToEndTest, CountStarSucceedsAndIsAudited) {
+    const httplib::Response response = post("SELECT COUNT(*) FROM customers");
+
+    ASSERT_EQ(response.status, 200);
+    const Json body = body_of(response);
+    EXPECT_EQ(body["columns"], Json::array({"count"}));
+    EXPECT_EQ(body["row_count"], 1);
+    EXPECT_EQ(body["rows"], Json::array({Json::array({"4"})}));  // 4 seeded rows
+
+    const Json audit = only_audit_line();
+    EXPECT_EQ(audit["outcome"], "SUCCESS");
+    EXPECT_EQ(audit["statement_type"], "SELECT");
+    EXPECT_EQ(audit["column_count"], 1);
+    EXPECT_EQ(audit["pii_email_columns"], 0);
+    EXPECT_EQ(audit["pii_phone_columns"], 0);
+    EXPECT_EQ(audit["pii_credit_card_columns"], 0);
+}
+
+TEST_F(EndToEndTest, CountStarWithAliasSucceedsAndIsNotMasked) {
+    // The alias is deliberately a mapped PII name. Attribution is by shape,
+    // so the count is returned intact rather than masked to "***".
+    const httplib::Response response = post("SELECT COUNT(*) AS email FROM customers");
+
+    ASSERT_EQ(response.status, 200);
+    const Json body = body_of(response);
+    EXPECT_EQ(body["columns"], Json::array({"email"}));
+    EXPECT_EQ(body["rows"], Json::array({Json::array({"4"})}));
+    EXPECT_EQ(only_audit_line()["pii_email_columns"], 0);
+}
+
+TEST_F(EndToEndTest, CountStarIsCaseInsensitiveEndToEnd) {
+    const httplib::Response response = post("select count(*) from customers");
+
+    ASSERT_EQ(response.status, 200);
+    EXPECT_EQ(body_of(response)["rows"], Json::array({Json::array({"4"})}));
+}
+
+TEST_F(EndToEndTest, CountStarOverAJoinSucceeds) {
+    const httplib::Response response =
+        post("SELECT COUNT(*) FROM customers c JOIN orders o ON c.id = o.customer_id");
+
+    ASSERT_EQ(response.status, 200);
+    EXPECT_EQ(body_of(response)["rows"], Json::array({Json::array({"4"})}));
+}
+
+TEST_F(EndToEndTest, CountVariantsRemainRefusedByClassification) {
+    // Each of these was refused before COUNT(*) was supported and must stay
+    // refused after it. COUNT(1) is included deliberately: it is equivalent
+    // in SQL, but only the canonical form is recognized. All are valid SQL,
+    // so they execute and are then refused because no column can be
+    // attributed.
+    for (const char* sql : {"SELECT COUNT(1) FROM customers",
+                            "SELECT COUNT(NULL) FROM customers",
+                            "SELECT COUNT(email) FROM customers",
+                            "SELECT COUNT(DISTINCT email) FROM customers",
+                            "SELECT COUNT(*) OVER () FROM customers",
+                            "SELECT COUNT(*) + 1 FROM customers",
+                            "SELECT COUNT(*) FROM customers GROUP BY email",
+                            "SELECT COUNT(*), COUNT(email) FROM customers"}) {
+        SCOPED_TRACE(sql);
+        Pipeline pipeline = make_pipeline(database_config(), audit_path_);
+        const httplib::Response response = post(sql, pipeline.service.get());
+        EXPECT_EQ(response.status, 422);
+        EXPECT_EQ(body_of(response)["error"], "masking_refused");
+        EXPECT_FALSE(body_of(response).contains("rows"));
+    }
+}
+
+TEST_F(EndToEndTest, MixedCountAndColumnIsRefusedByTheDatabase) {
+    // Mixing a bare column with an aggregate is invalid SQL in PostgreSQL
+    // ("must appear in the GROUP BY clause"), so these are rejected at
+    // execution and never reach classification. The classifier-level guard
+    // for the same shape is covered by
+    // DataClassifierTest.CountStarShapesThatMustStayUnattributed.
+    for (const char* sql : {"SELECT COUNT(*), email FROM customers",
+                            "SELECT COUNT(*), * FROM customers"}) {
+        SCOPED_TRACE(sql);
+        Pipeline pipeline = make_pipeline(database_config(), audit_path_);
+        const httplib::Response response = post(sql, pipeline.service.get());
+        EXPECT_EQ(response.status, 400);
+        EXPECT_EQ(body_of(response)["error"], "query_failed");
+        EXPECT_FALSE(body_of(response).contains("rows"));
+        EXPECT_EQ(response.body.find("@example."), std::string::npos);
+    }
+}
+
+TEST_F(EndToEndTest, ValueReturningAggregatesRemainRefusedAndLeakNothing) {
+    // MIN/MAX over a PII column return an actual value, so a regression here
+    // would be a direct disclosure rather than a shape error.
+    for (const char* sql : {"SELECT MIN(email) FROM customers",
+                            "SELECT MAX(email) FROM customers",
+                            "SELECT MAX(credit_card) FROM customers"}) {
+        SCOPED_TRACE(sql);
+        Pipeline pipeline = make_pipeline(database_config(), audit_path_);
+        const httplib::Response response = post(sql, pipeline.service.get());
+        EXPECT_EQ(response.status, 422);
+        EXPECT_EQ(response.body.find("@example."), std::string::npos);
+        EXPECT_EQ(response.body.find("4111"), std::string::npos);
+        EXPECT_EQ(response.body.find("5555"), std::string::npos);
+    }
+}
+
 // === Database failures ======================================================
 
 TEST_F(EndToEndTest, DatabaseExecutionFailureIsGenericAndLeaksNothing) {

@@ -256,6 +256,25 @@ TEST(ProxyServiceTest, ComputedProjectionIsRefusedByMaskingAndAudited) {
     EXPECT_EQ(record.masking_refused_details().column_count, 1u);
 }
 
+TEST(ProxyServiceTest, SafeCountStarSucceedsAndAuditsZeroPiiColumns) {
+    FakeParserHarness h;
+    ports::ParseResult parse = parsed_select({});
+    parse.statements[0].has_safe_count_star_projection = true;
+    h.parser->result_to_return = parse;
+    h.executor.result_to_return = ok_result({"count"}, {{Cell{"4"}}});
+
+    const core::ServiceResult result = h.service->handle("SELECT COUNT(*) FROM customers");
+
+    ASSERT_TRUE(result.succeeded());
+    EXPECT_EQ(result.result().column_names, (std::vector<std::string>{"count"}));
+    EXPECT_EQ(result.result().rows[0][0], Cell{"4"});  // never masked
+    const core::AuditRecord& record = only_record(h.audit);
+    EXPECT_EQ(record.outcome(), core::AuditOutcome::Success);
+    EXPECT_EQ(record.success_details().pii.email_columns, 0u);
+    EXPECT_EQ(record.success_details().pii.phone_columns, 0u);
+    EXPECT_EQ(record.success_details().pii.credit_card_columns, 0u);
+}
+
 // --- Unexpected failures ------------------------------------------------------
 
 TEST(ProxyServiceTest, UnexpectedParserExceptionBecomesInternalFailure) {

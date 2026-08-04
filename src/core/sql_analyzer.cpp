@@ -77,6 +77,8 @@ SqlAnalysis SqlAnalyzer::analyze(const std::string& sql) const {
     analysis.projection_columns = statement.projection_columns;
     analysis.has_wildcard_projection = statement.has_wildcard_projection;
     analysis.has_computed_projection = statement.has_computed_projection;
+    analysis.has_safe_count_star_projection = statement.has_safe_count_star_projection;
+    analysis.has_group_by = statement.has_group_by;
     analysis.affected_columns = statement.affected_columns;
     analysis.unsupported_features = statement.unsupported_features;
     return analysis;

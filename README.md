@@ -67,6 +67,8 @@ The analysis records, on a best-effort basis:
 - SELECT projection columns;
 - DML affected columns;
 - wildcard and computed-projection flags;
+- whether the projection is a canonical `COUNT(*)`;
+- whether the statement has a `GROUP BY`;
 - unsupported features.
 
 **Trade-off**
@@ -128,9 +130,19 @@ The supported PII categories are:
 
 The classifier receives column metadata only. It does not inspect row values, so sensitive values cannot enter or leak from the classification component.
 
+**Aggregates: the canonical `COUNT(*)`**
+
+Computed expressions normally cannot be attributed to a source column, so they are refused. One shape is recognized as safe and executed: the canonical `COUNT(*)`. It counts rows and never reads the contents of a column, so its result has no lineage to any stored value and cannot carry PII.
+
+Recognition happens in the parser adapter and is deliberately narrow. It requires a `COUNT` call, without `DISTINCT`, without a window clause, with exactly one argument that is the star. Attribution is then by shape rather than by name, so `SELECT COUNT(*) AS email` is still a count and is returned intact rather than masked.
+
+Everything else in the family remains refused exactly as before, including `COUNT(1)`, `COUNT(NULL)`, `COUNT(column)`, `COUNT(DISTINCT column)`, `COUNT(*) OVER (...)`, `COUNT(*) + 1`, `MIN`/`MAX`/`SUM`/`AVG`, any grouped count, and any projection that mixes a count with a column, a wildcard, or another expression.
+
 **Trade-off**
 
 Metadata-based classification is predictable and testable, but it cannot identify sensitive data stored under an unexpected or misleading column name.
+
+Supporting only the canonical `COUNT(*)` means `COUNT(1)` is rejected even though SQL treats the two as equivalent. That is deliberate: the goal is one well-defined safe shape rather than a family of variants, and each additional form widens the surface that has to be kept safe.
 
 ### Masking enforcement
 
@@ -296,7 +308,7 @@ The test suites cover:
 
 - SQL coverage is intentionally bounded by the parser and adapter.
 - Some advanced `ALTER TABLE` syntax is unsupported.
-- Computed projections that cannot be attributed safely are refused instead of being returned without masking.
+- Computed projections that cannot be attributed safely are refused instead of being returned without masking. The canonical `COUNT(*)` is the one recognized exception; `COUNT(1)` and every other variant remain refused.
 - Table references hidden inside some subqueries may not be visible to the analyzer.
 - Identifier normalization follows a simplified ASCII case model rather than full PostgreSQL identifier semantics.
 - Requests are currently processed serially, and each execution opens a short-lived database connection.

@@ -64,6 +64,141 @@ TEST(SqlParserContract, SelectQualifiedWildcard) {
     EXPECT_TRUE(stmt.has_wildcard_projection);
 }
 
+// === Canonical COUNT(*) recognition ========================================
+//
+// The single computed shape reported as safe. Each negative case asserts
+// that a near-miss stays a generic computed projection, which is what keeps
+// it refused downstream.
+
+TEST(SqlParserContract, CountStarIsSafeCountStar) {
+    auto result = parse("SELECT COUNT(*) FROM customers");
+    const auto& stmt = only_statement(result);
+    EXPECT_TRUE(stmt.has_safe_count_star_projection);
+    EXPECT_FALSE(stmt.has_computed_projection);
+    EXPECT_FALSE(stmt.has_wildcard_projection);
+    EXPECT_TRUE(stmt.projection_columns.empty());
+    EXPECT_FALSE(stmt.has_group_by);
+}
+
+TEST(SqlParserContract, CountStarIsCaseInsensitive) {
+    // The parser preserves function-name spelling verbatim, so recognition
+    // has to fold case itself.
+    for (const char* sql : {"SELECT count(*) FROM customers",
+                            "SELECT CoUnT(*) FROM customers",
+                            "SELECT COUNT(*) FROM customers"}) {
+        SCOPED_TRACE(sql);
+        auto result = parse(sql);
+        const auto& stmt = only_statement(result);
+        EXPECT_TRUE(stmt.has_safe_count_star_projection);
+        EXPECT_FALSE(stmt.has_computed_projection);
+    }
+}
+
+TEST(SqlParserContract, CountStarWithAliasIsStillSafeCountStar) {
+    // An alias lives on the same node and changes neither its type nor the
+    // function name, so it cannot affect recognition.
+    auto result = parse("SELECT COUNT(*) AS total FROM customers");
+    const auto& stmt = only_statement(result);
+    EXPECT_TRUE(stmt.has_safe_count_star_projection);
+    EXPECT_FALSE(stmt.has_computed_projection);
+}
+
+TEST(SqlParserContract, CountVariantsAreNotSafeCountStar) {
+    // Only the canonical form is recognized. COUNT(1) is equivalent in SQL
+    // and is still refused: this feature accepts one shape, not a family.
+    for (const char* sql : {"SELECT COUNT(1) FROM customers",
+                            "SELECT COUNT(0) FROM customers",
+                            "SELECT COUNT(1.0) FROM customers",
+                            "SELECT COUNT(NULL) FROM customers",
+                            "SELECT COUNT(email) FROM customers",
+                            "SELECT COUNT(DISTINCT email) FROM customers",
+                            "SELECT COUNT(DISTINCT 1) FROM customers"}) {
+        SCOPED_TRACE(sql);
+        auto result = parse(sql);
+        const auto& stmt = only_statement(result);
+        EXPECT_FALSE(stmt.has_safe_count_star_projection);
+        EXPECT_TRUE(stmt.has_computed_projection);
+    }
+}
+
+TEST(SqlParserContract, CountStarOverWindowIsNotSafeCountStar) {
+    // Byte-identical to a plain COUNT(*) except for the window description;
+    // missing this check would silently admit window functions.
+    auto result = parse("SELECT COUNT(*) OVER () FROM customers");
+    const auto& stmt = only_statement(result);
+    EXPECT_FALSE(stmt.has_safe_count_star_projection);
+    EXPECT_TRUE(stmt.has_computed_projection);
+}
+
+TEST(SqlParserContract, CountStarInsideArithmeticIsNotSafeCountStar) {
+    // The top-level node is an operator; the call is nested inside it.
+    auto result = parse("SELECT COUNT(*) + 1 FROM customers");
+    const auto& stmt = only_statement(result);
+    EXPECT_FALSE(stmt.has_safe_count_star_projection);
+    EXPECT_TRUE(stmt.has_computed_projection);
+}
+
+TEST(SqlParserContract, OtherAggregatesAndFunctionsAreNotSafeCountStar) {
+    // MIN/MAX return actual column values; SUM/AVG derive from them;
+    // UPPER/LOWER/CONCAT transform them.
+    for (const char* sql : {"SELECT MIN(email) FROM customers",
+                            "SELECT MAX(email) FROM customers",
+                            "SELECT MAX(credit_card) FROM customers",
+                            "SELECT SUM(amount) FROM orders",
+                            "SELECT AVG(amount) FROM orders",
+                            "SELECT UPPER(email) FROM customers",
+                            "SELECT LOWER(email) FROM customers",
+                            "SELECT CONCAT(name, email) FROM customers"}) {
+        SCOPED_TRACE(sql);
+        auto result = parse(sql);
+        const auto& stmt = only_statement(result);
+        EXPECT_FALSE(stmt.has_safe_count_star_projection);
+        EXPECT_TRUE(stmt.has_computed_projection);
+    }
+}
+
+TEST(SqlParserContract, GroupByIsReportedAsSyntaxFact) {
+    auto grouped = parse("SELECT COUNT(*) FROM customers GROUP BY email");
+    const auto& grouped_stmt = only_statement(grouped);
+    EXPECT_TRUE(grouped_stmt.has_safe_count_star_projection);
+    EXPECT_TRUE(grouped_stmt.has_group_by);  // the core decides what it means
+
+    auto having = parse("SELECT COUNT(*) FROM customers GROUP BY id HAVING COUNT(*) > 1");
+    EXPECT_TRUE(only_statement(having).has_group_by);
+
+    auto ungrouped = parse("SELECT COUNT(*) FROM customers");
+    EXPECT_FALSE(only_statement(ungrouped).has_group_by);
+}
+
+TEST(SqlParserContract, MixedProjectionsReportEveryShapeTheyContain) {
+    // Exactly one arm fires per entry, so the core sees the full picture and
+    // can refuse the combination.
+    auto with_column = parse("SELECT COUNT(*), email FROM customers");
+    const auto& a = only_statement(with_column);
+    EXPECT_TRUE(a.has_safe_count_star_projection);
+    EXPECT_EQ(a.projection_columns, std::vector<std::string>({"email"}));
+
+    auto with_wildcard = parse("SELECT COUNT(*), * FROM customers");
+    const auto& b = only_statement(with_wildcard);
+    EXPECT_TRUE(b.has_safe_count_star_projection);
+    EXPECT_TRUE(b.has_wildcard_projection);
+
+    auto with_literal = parse("SELECT COUNT(*), 1 FROM customers");
+    const auto& c = only_statement(with_literal);
+    EXPECT_TRUE(c.has_safe_count_star_projection);
+    EXPECT_TRUE(c.has_computed_projection);  // a bare literal is not safe here
+
+    auto with_unsafe_count = parse("SELECT COUNT(*), COUNT(email) FROM customers");
+    const auto& d = only_statement(with_unsafe_count);
+    EXPECT_TRUE(d.has_safe_count_star_projection);
+    EXPECT_TRUE(d.has_computed_projection);
+
+    auto two_counts = parse("SELECT COUNT(*), COUNT(*) FROM customers");
+    const auto& e = only_statement(two_counts);
+    EXPECT_TRUE(e.has_safe_count_star_projection);
+    EXPECT_FALSE(e.has_computed_projection);
+}
+
 TEST(SqlParserContract, SelectMixedPlainAndComputed) {
     auto result = parse("SELECT id, UPPER(email) FROM customers");
     const auto& stmt = only_statement(result);

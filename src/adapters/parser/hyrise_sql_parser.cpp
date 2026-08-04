@@ -23,6 +23,54 @@ std::string copy_or_empty(const char* s) {
     return s == nullptr ? std::string() : std::string(s);
 }
 
+// ASCII-only lowering, as in the core: locale-independent and well-defined on
+// negative char. Needed because the parser preserves function-name spelling
+// exactly as written ("count", "COUNT", "CoUnT" all reach us verbatim).
+std::string ascii_lower(std::string s) {
+    for (char& c : s) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    return s;
+}
+
+// The canonical COUNT(*), and nothing else.
+//
+// COUNT(*) counts ROWS; it never reads, transforms, or returns the contents
+// of a column, so its result has no lineage to any source value and cannot
+// expose PII. Each condition below excludes a shape that would not hold that
+// property:
+//
+//   - the node must be a function call: COUNT(*) + 1 parses as an operator
+//     with the call nested inside, and stays computed;
+//   - the name must be COUNT: MIN/MAX return actual column values, SUM/AVG
+//     derive from them, UPPER/CONCAT transform them;
+//   - DISTINCT is refused: COUNT(DISTINCT col) reports a column's cardinality;
+//   - a window clause is refused: COUNT(*) OVER (...) is a per-row value with
+//     different semantics, and is otherwise identical to a plain COUNT(*)
+//     in this AST;
+//   - the single argument must be the star. COUNT(1) is not accepted even
+//     though SQL treats it as equivalent: this recognizes one canonical
+//     form, not a family of COUNT variants. COUNT(NULL) is not equivalent
+//     at all, since it returns 0.
+bool is_count_star(const hsql::Expr& e) {
+    if (e.type != hsql::kExprFunctionRef) {
+        return false;
+    }
+    if (ascii_lower(copy_or_empty(e.name)) != "count") {
+        return false;
+    }
+    if (e.distinct || e.windowDescription != nullptr) {
+        return false;
+    }
+    if (e.exprList == nullptr || e.exprList->size() != 1) {
+        return false;
+    }
+    const hsql::Expr* argument = e.exprList->front();
+    return argument != nullptr && argument->type == hsql::kExprStar;
+}
+
 // Fixed note strings only — never derived from user input.
 constexpr const char* kNoteInsertWithoutColumns = "INSERT without column list";
 constexpr const char* kNoteFromSubquery = "subquery in FROM";
@@ -62,7 +110,9 @@ void collect_tables(const hsql::TableRef* ref, ports::ParsedStatement& out) {
 
 // Projection contract (ports::ParsedStatement): plain column identifiers only,
 // spelled as written (qualifier kept, e.g. "c.id"); a star sets the wildcard
-// flag; anything else sets the computed flag.
+// flag; a canonical COUNT(*) sets the safe-count flag; anything else sets the
+// computed flag. Exactly one arm fires per entry, so a mixed projection
+// reports every shape it contains and the core can refuse the combination.
 void classify_projection(const std::vector<hsql::Expr*>* select_list,
                          ports::ParsedStatement& out) {
     if (select_list == nullptr) {
@@ -81,6 +131,8 @@ void classify_projection(const std::vector<hsql::Expr*>* select_list,
             }
             column += copy_or_empty(e->name);
             out.projection_columns.push_back(std::move(column));
+        } else if (is_count_star(*e)) {
+            out.has_safe_count_star_projection = true;
         } else {
             out.has_computed_projection = true;
         }
@@ -91,6 +143,10 @@ void translate_select(const hsql::SelectStatement& stmt, ports::ParsedStatement&
     out.type = core::StatementType::Select;
     collect_tables(stmt.fromTable, out);
     classify_projection(stmt.selectList, out);
+    // Reported as a bare syntax fact. HAVING needs no separate handling: the
+    // parser stores it inside the GROUP BY description, and HAVING without
+    // GROUP BY does not parse at all.
+    out.has_group_by = stmt.groupBy != nullptr;
     if (stmt.withDescriptions != nullptr && !stmt.withDescriptions->empty()) {
         out.unsupported_features.push_back(kNoteWithCte);
     }

@@ -86,26 +86,51 @@ ClassificationResult DataClassifier::classify(
         analysis.status == AnalysisStatus::Ok &&
         analysis.statement_class == StatementClass::Select;
 
+    // The three shapes are mutually exclusive by construction. Excluding a
+    // safe COUNT(*) from the two name-based modes is what keeps a mixed
+    // projection refused: without it, SELECT COUNT(*), * would satisfy
+    // wildcard_shape (no computed flag is set any more) and would be
+    // classified by result-column name instead of being refused.
     const bool positional_shape =
         analyzable && !analysis.has_wildcard_projection &&
         !analysis.has_computed_projection &&
+        !analysis.has_safe_count_star_projection &&
         !analysis.projection_columns.empty() &&
         analysis.projection_columns.size() == result_columns.size();
 
     const bool wildcard_shape =
         analyzable && analysis.has_wildcard_projection &&
         analysis.projection_columns.empty() &&
-        !analysis.has_computed_projection;
+        !analysis.has_computed_projection &&
+        !analysis.has_safe_count_star_projection;
 
-    if (!positional_shape && !wildcard_shape) {
-        // Computed projections, mixed star+explicit shapes, and
-        // projection/result count mismatches all land here: never guess a
+    // Every projection entry is a canonical COUNT(*): no wildcard, no plain
+    // column, no other computed expression, and no GROUP BY. The result is
+    // then one row for the whole input, and every column is a row count with
+    // no lineage to a source value. Attribution here is by shape, so no name
+    // is consulted and an alias cannot influence the outcome.
+    const bool count_star_only_shape =
+        analyzable && analysis.has_safe_count_star_projection &&
+        !analysis.has_wildcard_projection &&
+        !analysis.has_computed_projection &&
+        !analysis.has_group_by &&
+        analysis.projection_columns.empty();
+
+    if (!positional_shape && !wildcard_shape && !count_star_only_shape) {
+        // Computed projections, mixed star+explicit shapes, grouped counts,
+        // and projection/result count mismatches all land here: never guess a
         // source column, never shift indices, never classify a partial
         // prefix, never silently claim NotClassifiedAsPii.
         return result;
     }
 
     for (std::size_t i = 0; i < result_columns.size(); ++i) {
+        if (count_star_only_shape) {
+            // A row count is never PII, whatever the column is named: an
+            // alias such as COUNT(*) AS email must not reach the mapping.
+            result.columns[i] = not_pii();
+            continue;
+        }
         const std::string source =
             positional_shape ? strip_qualifier(analysis.projection_columns[i])
                              : result_columns[i].name;

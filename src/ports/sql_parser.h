@@ -23,12 +23,28 @@ struct TableRef {
 // only. Computed expressions (function calls, arithmetic, CASE, ...) must not
 // appear in it — they set has_computed_projection. A mixed projection
 // (e.g. SELECT id, UPPER(email)) yields both list entries and the flag.
+//
+// Exactly ONE computed shape is reported separately instead of as a generic
+// computed projection: the canonical COUNT(*). See has_safe_count_star_projection.
 struct ParsedStatement {
     core::StatementType type = core::StatementType::Unknown;
     std::vector<TableRef> tables;
     std::vector<std::string> projection_columns;  // SELECT only
     bool has_wildcard_projection = false;
     bool has_computed_projection = false;
+
+    // Set when a projection entry is the canonical COUNT(*): it counts ROWS
+    // and never the contents of a column, so its result has no lineage to any
+    // source value and cannot carry PII. Such an entry sets this flag INSTEAD
+    // of has_computed_projection. Narrow by design: COUNT(1), COUNT(NULL),
+    // COUNT(col), COUNT(DISTINCT ...), COUNT(*) OVER (...) and every other
+    // function remain generic computed projections.
+    bool has_safe_count_star_projection = false;
+
+    // Plain syntax fact, not a judgement: the statement has a GROUP BY (which
+    // in this parser also carries HAVING). Reported so the core can decide
+    // what it means; the adapter itself draws no conclusion from it.
+    bool has_group_by = false;
     std::vector<std::string> affected_columns;  // INSERT/UPDATE only
     std::vector<std::string> unsupported_features;
 };

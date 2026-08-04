@@ -54,6 +54,19 @@ struct SqlAnalysis {
     bool has_wildcard_projection = false;  // SELECT * (or t.*)
     bool has_computed_projection = false;
 
+    // The canonical COUNT(*) appeared in the projection. It counts rows, not
+    // column contents, so it is the one computed shape with no lineage to a
+    // source value. It is reported separately from a generic computed
+    // projection so the classifier can attribute it. Narrow by design:
+    // COUNT(1), COUNT(NULL), COUNT(col), COUNT(DISTINCT ...) and
+    // COUNT(*) OVER (...) all remain has_computed_projection.
+    bool has_safe_count_star_projection = false;
+
+    // Syntax fact only. A grouped result is one row per group rather than one
+    // row for the whole input, which is why a grouped COUNT(*) is not
+    // attributable. That rule lives in DataClassifier, not in the parser.
+    bool has_group_by = false;
+
     std::vector<std::string> affected_columns;  // INSERT column list / UPDATE SET targets
     std::vector<std::string> unsupported_features;
 

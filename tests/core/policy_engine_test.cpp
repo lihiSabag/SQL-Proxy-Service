@@ -175,7 +175,7 @@ TEST(PolicyEngineTest, MixedWildcardProjectionIsRejected) {  // R10
 }
 
 // Pins CURRENT behavior: general computed projections over tables
-// (UPPER(email), CONCAT(name, email), COUNT(*)) remain ALLOWED by policy.
+// (UPPER(email), CONCAT(name, email), MIN(email)) remain ALLOWED by policy.
 // The classifier marks them Unattributed rather than guessing a source
 // column. Whether policy should reject them outright is an open question; if
 // that rejection is adopted later, this test must change with it.
@@ -188,6 +188,20 @@ TEST(PolicyEngineTest, ComputedProjectionIsCurrentlyAllowed) {
     mixed.projection_columns = {"id"};
     mixed.has_computed_projection = true;
     expect_allowed(mixed);
+}
+
+// A canonical COUNT(*) needs no policy rule of its own: it sets neither the
+// wildcard nor the computed flag, so R10 cannot fire and R11 allows it. The
+// decision that makes it *safe* belongs to the classifier, not here.
+TEST(PolicyEngineTest, SafeCountStarProjectionIsAllowed) {
+    core::SqlAnalysis count_star = select_on({"customers"});
+    count_star.has_safe_count_star_projection = true;
+    expect_allowed(count_star);
+
+    // Grouped counts are allowed by policy too; the classifier refuses them.
+    core::SqlAnalysis grouped = count_star;
+    grouped.has_group_by = true;
+    expect_allowed(grouped);
 }
 
 // --- Precedence (two meaningful pairs) ---------------------------------------

@@ -84,6 +84,35 @@ TEST(SqlAnalyzer, ComputedFlagPropagated) {
     EXPECT_TRUE(analysis.projection_columns.empty());
 }
 
+TEST(SqlAnalyzer, SafeCountStarAndGroupByFlagsPropagated) {
+    AnalyzerFixture f;
+    ports::ParsedStatement stmt;
+    stmt.type = core::StatementType::Select;
+    stmt.has_safe_count_star_projection = true;
+    stmt.has_group_by = true;
+    f.fake->result_to_return = single_statement(std::move(stmt));
+
+    auto analysis = f.analyzer.analyze("SELECT COUNT(*) FROM customers GROUP BY id");
+
+    EXPECT_EQ(analysis.status, core::AnalysisStatus::Ok);
+    EXPECT_TRUE(analysis.has_safe_count_star_projection);
+    EXPECT_TRUE(analysis.has_group_by);
+    EXPECT_FALSE(analysis.has_computed_projection);
+}
+
+TEST(SqlAnalyzer, SafeCountStarAndGroupByDefaultToFalse) {
+    AnalyzerFixture f;
+    ports::ParsedStatement stmt;
+    stmt.type = core::StatementType::Select;
+    stmt.projection_columns = {"id"};
+    f.fake->result_to_return = single_statement(std::move(stmt));
+
+    auto analysis = f.analyzer.analyze("SELECT id FROM customers");
+
+    EXPECT_FALSE(analysis.has_safe_count_star_projection);
+    EXPECT_FALSE(analysis.has_group_by);
+}
+
 TEST(SqlAnalyzer, MixedPlainAndComputedProjection) {
     AnalyzerFixture f;
     ports::ParsedStatement stmt;
