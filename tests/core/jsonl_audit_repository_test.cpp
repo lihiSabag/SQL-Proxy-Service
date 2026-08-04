@@ -15,6 +15,7 @@
 
 #include "adapters/audit/jsonl_audit_repository.h"
 #include "core/audit_record.h"
+#include "fake_audit_repository.h"
 #include "ports/audit_repository.h"
 
 namespace {
@@ -248,6 +249,19 @@ TEST_F(JsonlAuditRepositoryTest, EmptyExistingFileIsValid) {
     audit_adapter::JsonlAuditRepository repo(path_);
     EXPECT_EQ(repo.append(sample_success()), ports::AuditAppendResult::Ok);
     EXPECT_EQ(lines().size(), 1u);
+}
+
+TEST_F(JsonlAuditRepositoryTest, FakeRecordsAndReturnsConfiguredResult) {
+    fakes::FakeAuditRepository fake;
+    EXPECT_EQ(fake.append(sample_success()), ports::AuditAppendResult::Ok);
+
+    fake.result_to_return = ports::AuditAppendResult::WriteFailure;
+    EXPECT_EQ(fake.append(core::AuditRecord::parsing_failure(1, 2)),
+              ports::AuditAppendResult::WriteFailure);
+
+    ASSERT_EQ(fake.appended.size(), 2u);  // order preserved
+    EXPECT_EQ(fake.appended[0].outcome(), core::AuditOutcome::Success);
+    EXPECT_EQ(fake.appended[1].outcome(), core::AuditOutcome::ParsingFailure);
 }
 
 }  // namespace

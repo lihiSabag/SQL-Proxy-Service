@@ -46,9 +46,24 @@ enable_testing()
 add_executable(sql_proxy_service
     src/main.cpp
     src/config/server_config.cpp
+    src/config/database_config.cpp
+    src/core/sql_analysis.cpp
+    src/core/sql_analyzer.cpp
+    src/core/policy_decision.cpp
+    src/core/policy_engine.cpp
+    src/core/data_classification.cpp
+    src/core/data_classifier.cpp
+    src/core/pii_masker.cpp
+    src/core/audit_record.cpp
+    src/core/service_result.cpp
+    src/core/proxy_service.cpp
     src/logging/system_log.cpp
     src/adapters/http/http_server.cpp
     src/adapters/http/health_routes.cpp
+    src/adapters/http/query_routes.cpp
+    src/adapters/parser/hyrise_sql_parser.cpp
+    src/adapters/postgres/postgres_query_executor.cpp
+    src/adapters/audit/jsonl_audit_repository.cpp
 )
 
 target_include_directories(sql_proxy_service
@@ -60,7 +75,9 @@ target_link_libraries(sql_proxy_service
     PRIVATE
         httplib::httplib
         nlohmann_json::nlohmann_json
+        libpqxx::pqxx
         spdlog::spdlog
+        hsql_vendored
 )
 
 add_executable(sql_proxy_unit_tests
@@ -73,6 +90,7 @@ add_executable(sql_proxy_unit_tests
     tests/core/pii_masker_test.cpp
     tests/core/audit_record_test.cpp
     tests/core/jsonl_audit_repository_test.cpp
+    tests/core/proxy_service_test.cpp
     src/config/server_config.cpp
     src/config/database_config.cpp
     src/core/sql_analysis.cpp
@@ -83,6 +101,9 @@ add_executable(sql_proxy_unit_tests
     src/core/data_classifier.cpp
     src/core/pii_masker.cpp
     src/core/audit_record.cpp
+    src/core/service_result.cpp
+    src/core/proxy_service.cpp
+    src/logging/system_log.cpp
     src/adapters/parser/hyrise_sql_parser.cpp
     src/adapters/audit/jsonl_audit_repository.cpp
 )
@@ -98,11 +119,51 @@ target_link_libraries(sql_proxy_unit_tests
         GTest::gtest
         GTest::gtest_main
         nlohmann_json::nlohmann_json
+        spdlog::spdlog
         hsql_vendored
 )
 
 add_test(NAME sql_proxy_unit_tests COMMAND sql_proxy_unit_tests)
 set_tests_properties(sql_proxy_unit_tests PROPERTIES LABELS "unit")
+
+# HTTP contract tests. Separate target because they need no database and must
+# not skip when PostgreSQL is absent — folding them into the postgres target
+# would make its "postgres" label untrue.
+add_executable(sql_proxy_http_tests
+    tests/integration/http_query_test.cpp
+    src/core/sql_analysis.cpp
+    src/core/sql_analyzer.cpp
+    src/core/policy_decision.cpp
+    src/core/policy_engine.cpp
+    src/core/data_classification.cpp
+    src/core/data_classifier.cpp
+    src/core/pii_masker.cpp
+    src/core/audit_record.cpp
+    src/core/service_result.cpp
+    src/core/proxy_service.cpp
+    src/logging/system_log.cpp
+    src/adapters/http/http_server.cpp
+    src/adapters/http/health_routes.cpp
+    src/adapters/http/query_routes.cpp
+)
+
+target_include_directories(sql_proxy_http_tests
+    PRIVATE
+        src
+        tests/fakes
+)
+
+target_link_libraries(sql_proxy_http_tests
+    PRIVATE
+        GTest::gtest
+        GTest::gtest_main
+        httplib::httplib
+        nlohmann_json::nlohmann_json
+        spdlog::spdlog
+)
+
+add_test(NAME sql_proxy_http_tests COMMAND sql_proxy_http_tests)
+set_tests_properties(sql_proxy_http_tests PROPERTIES LABELS "integration;http")
 
 # Executor tests against a real PostgreSQL. Kept in a separate target with its
 # own label so the unit target stays database-free and never skips.

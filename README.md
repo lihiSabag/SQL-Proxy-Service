@@ -6,12 +6,11 @@ result set, masks it before anything is returned, and records an audit entry for
 
 Written in C++17. Developed on Linux.
 
-The service currently exposes only the health endpoint. The core now includes a tested SQL analysis
-component backed by a real SQL parser, a read-only access policy, a PostgreSQL execution layer tested
-against a real database, PII classification and masking of result columns, and an audit trail for
-request outcomes; none of them is connected to the HTTP service yet.
+The pipeline is now wired end to end: `POST /query` analyzes the statement, applies the read-only
+policy, executes what it allows against PostgreSQL, classifies and masks PII in the result, and
+records the outcome in the audit trail before responding.
 
-## Planned request pipeline
+## Request pipeline
 
 ```
 HTTP request
@@ -322,11 +321,9 @@ reported as `OPEN_FAILURE` or `WRITE_FAILURE`, with no path and no OS text, and 
 service; the audit trail records outcomes for later review. Different audiences, different rules,
 different destinations.
 
-**Audit persistence is implemented, but nothing calls it yet.** Records can be built and appended, and
-the repository is tested directly, but no request path produces a record: the HTTP service still
-exposes only the health endpoint. Wiring the audit trail into request processing — including the rule
-that a successful result may leave the service *only* if its record was persisted — belongs to the
-orchestrator, which does not exist at this point.
+**Every controlled SQL request produces exactly one audit append attempt** — success, rejection or
+failure alike. That is structural: the orchestrator's internal step returns a client result and an
+audit record together, from every path, and there is exactly one call site that appends.
 
 ## Prerequisites
 
@@ -361,8 +358,8 @@ cmake --build build -j
 
 The first configure builds the dependencies from source and takes a while; later builds are fast.
 
-Produces `build/sql_proxy_service`, `build/sql_proxy_unit_tests` and
-`build/sql_proxy_integration_tests`.
+Produces `build/sql_proxy_service`, `build/sql_proxy_unit_tests`,
+`build/sql_proxy_http_tests` and `build/sql_proxy_integration_tests`.
 
 ## Database setup
 
@@ -409,13 +406,12 @@ All configuration is environment variables. Errors name the variable, never its 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | `PORT` | no | `8080` | HTTP listen port |
-| `DATABASE_URL` | yes, for the execution layer | — | libpq connection URI. Treated as a secret: never logged, never returned in an error, never printed by tests. |
+| `DATABASE_URL` | **yes** | — | libpq connection URI. Treated as a secret: never logged, never returned in an error, never printed by tests. |
 | `DB_STATEMENT_TIMEOUT_MS` | no | `5000` | per-statement timeout, applied as `SET LOCAL statement_timeout`; must be a positive integer up to 600000 |
+| `AUDIT_LOG_PATH` | no | `audit.jsonl` | JSON Lines audit sink |
 
-An invalid value fails with a clear message that names the variable only.
-
-`DATABASE_URL` is read by the execution layer, which the HTTP service does not use yet, so
-`./build/sql_proxy_service` still starts without it.
+Startup fails fast with a clear message and exit code 1 if `DATABASE_URL` is missing or another value
+is invalid. Errors name the variable, never its value.
 
 **Keep the password out of `DATABASE_URL`.** Put it in `~/.pgpass` (mode `600`) and omit it from the
 URL, so it never appears in your shell history, the process list, or the environment:
@@ -430,6 +426,8 @@ export DATABASE_URL="postgresql://sql_proxy_user@localhost:5432/sql_proxy"
 ## Running
 
 ```bash
+export DATABASE_URL="postgresql://sql_proxy_user@localhost:5432/sql_proxy"
+export AUDIT_LOG_PATH="./audit.jsonl"
 ./build/sql_proxy_service
 ```
 
@@ -444,19 +442,70 @@ $ curl -s localhost:8080/health
 {"status":"ok"}
 ```
 
+### `POST /query`
+
+```console
+$ curl -s -XPOST localhost:8080/query -H 'Content-Type: application/json' \
+       -d '{"sql":"SELECT id, name, email FROM customers ORDER BY id"}'
+{"columns":["id","name","email"],
+ "row_count":4,
+ "rows":[["1","Lihi Roas","l***@example.com"],
+         ["2","Kim Perez","k***@example.org"],
+         ["3","Daniel Mizrahi","d***@example.net"],
+         ["4","Yael Azulay","y***@example.com"]]}
+```
+
+Rows are **positional arrays**, not objects: column order is preserved and duplicate column names
+(`SELECT email, email …`) both survive, which a JSON object would silently collapse. SQL `NULL`
+becomes JSON `null` and an empty string stays `""`. Column metadata is returned even when there are
+zero rows.
+
+Failures return `{"error":"<code>","message":"<fixed text>"}` and never contain SQL, values, column
+or table names, SQLSTATE codes, or driver text:
+
+| Situation | Status | `error` |
+|---|---|---|
+| bad content type, invalid JSON, missing/non-string `sql`, body over 64 KiB | `400` | `bad_request` |
+| empty `sql` | `400` | `empty_sql` |
+| SQL could not be parsed | `400` | `invalid_sql` |
+| rejected by policy (any reason) | `403` | `policy_rejected` |
+| the database rejected the statement | `400` | `query_failed` |
+| the database was unreachable | `503` | `database_unavailable` |
+| results could not be safely masked | `422` | `masking_refused` |
+| internal error, including an audit write failure on an otherwise successful request | `500` | `internal_error` |
+
+**Every policy denial returns the same generic `403`.** The audit record keeps the precise reason;
+the client cannot tell a system-catalog rejection from a DML rejection, so the rule set cannot be
+mapped by probing. The transport-level `400`s are the exception in another sense: they are rejected
+before the pipeline runs and produce **no** audit record, because they are malformed HTTP requests
+rather than SQL requests.
+
+## Concurrency model
+
+`ProxyService` serializes the entire pipeline behind one mutex: **one controlled SQL request is
+processed at a time.** The executor itself is safe to call concurrently — it holds no shared mutable
+state and opens a connection per call — but without a connection pool, N concurrent requests would
+open N simultaneous database connections with no upper bound. Serializing bounds that to one and
+keeps behaviour deterministic. Throughput is explicitly out of scope; a connection pool behind
+`IQueryExecutor` plus removing this lock is the documented next step, and it touches no core
+contract.
+
 ## Testing
 
-Two executables. The unit tests need no database and never skip.
+Three executables. The first two need no database and never skip.
 
 ```bash
-# Unit tests — configuration, SQL analysis, policy, classification, masking and audit
+# Unit tests — configuration, analysis, policy, classification, masking, audit, orchestration
 ./build/sql_proxy_unit_tests
+
+# HTTP contract tests — request/response shapes, status codes, leak assertions
+./build/sql_proxy_http_tests
 
 # Executor tests — REQUIRE a real PostgreSQL (see below)
 export TEST_DATABASE_URL="postgresql://sql_proxy_test_user@localhost:5432/sql_proxy_test"
 SQL_PROXY_TEST_DB_RESET=1 ./build/sql_proxy_integration_tests
 
-(cd build && ctest -L unit)     # or -L postgres, or ctest for everything
+(cd build && ctest -L unit)     # or -L http, -L postgres, or ctest for everything
 ```
 
 The database-backed tests are **fail-closed by design**, because they drop and recreate the demo
