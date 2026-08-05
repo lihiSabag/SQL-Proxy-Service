@@ -375,6 +375,108 @@ TEST(ProxyServiceTest, InsertExecutionFailureIsAuditedAsADatabaseFailure) {
               core::StatementType::Insert);
 }
 
+// --- Referenced-table metadata reaches every eligible call site ---------------
+//
+// One case per production call site. The detailed validation matrix lives in
+// audit_record_test.cpp and is not repeated here.
+
+namespace {
+
+const core::AuditTableMetadata& tables_of(const fakes::FakeAuditRepository& audit) {
+    return only_record(audit).referenced_tables();
+}
+
+}  // namespace
+
+TEST(ProxyServiceTest, ReadSuccessRecordsItsTables) {
+    FakeParserHarness h;
+    ports::ParseResult parse = parsed_select({"id"});
+    parse.statements[0].tables = {{"", "customers"}, {"", "orders"}};
+    h.parser->result_to_return = parse;
+    h.executor.result_to_return = ok_result({"id"}, {{Cell{"1"}}});
+
+    ASSERT_TRUE(h.service->handle("SELECT id FROM customers JOIN orders").succeeded());
+    EXPECT_EQ(tables_of(h.audit).state, core::AuditTableState::Present);
+    EXPECT_EQ(tables_of(h.audit).tables,
+              (std::vector<std::string>{"customers", "orders"}));
+}
+
+TEST(ProxyServiceTest, WriteSuccessRecordsItsTable) {
+    FakeParserHarness h;
+    h.parser->result_to_return = parsed_order_insert();
+    h.executor.result_to_return = write_result(1);
+
+    ASSERT_TRUE(h.service->handle("INSERT INTO orders ...").succeeded());
+    EXPECT_EQ(tables_of(h.audit).state, core::AuditTableState::Present);
+    EXPECT_EQ(tables_of(h.audit).tables, (std::vector<std::string>{"orders"}));
+}
+
+TEST(ProxyServiceTest, PolicyRejectionAfterAnalysisRecordsTheAttemptedTable) {
+    FakeParserHarness h;
+    ports::ParseResult parse = parsed_select({});
+    parse.statements[0].type = core::StatementType::Drop;
+    parse.statements[0].tables = {{"", "customers"}};
+    h.parser->result_to_return = parse;
+
+    EXPECT_FALSE(h.service->handle("DROP TABLE customers").succeeded());
+    const core::AuditRecord& record = only_record(h.audit);
+    EXPECT_EQ(record.outcome(), core::AuditOutcome::PolicyRejected);
+    EXPECT_EQ(record.referenced_tables().state, core::AuditTableState::Present);
+    EXPECT_EQ(record.referenced_tables().tables,
+              (std::vector<std::string>{"customers"}));
+}
+
+TEST(ProxyServiceTest, DatabaseFailureRecordsItsTables) {
+    FakeParserHarness h;
+    h.parser->result_to_return = parsed_select({"id"});
+    ports::ExecutionResult failed;
+    failed.status = ports::ExecutionStatus::ExecutionFailure;
+    h.executor.result_to_return = failed;
+
+    EXPECT_FALSE(h.service->handle("SELECT id FROM customers").succeeded());
+    EXPECT_EQ(only_record(h.audit).outcome(), core::AuditOutcome::DatabaseFailure);
+    EXPECT_EQ(tables_of(h.audit).tables, (std::vector<std::string>{"customers"}));
+}
+
+TEST(ProxyServiceTest, MaskingRefusalRecordsItsTables) {
+    FakeParserHarness h;
+    ports::ParseResult parse = parsed_select({});
+    parse.statements[0].has_computed_projection = true;
+    h.parser->result_to_return = parse;
+    h.executor.result_to_return = ok_result({"upper"}, {{Cell{"X"}}});
+
+    EXPECT_FALSE(h.service->handle("SELECT UPPER(email) FROM customers").succeeded());
+    EXPECT_EQ(only_record(h.audit).outcome(), core::AuditOutcome::MaskingRefused);
+    EXPECT_EQ(tables_of(h.audit).tables, (std::vector<std::string>{"customers"}));
+}
+
+TEST(ProxyServiceTest, ParsingFailureRecordsNoTables) {
+    FakeParserHarness h;
+    h.parser->result_to_return = ports::ParseResult{false, {}, "syntax error"};
+
+    EXPECT_FALSE(h.service->handle("SELEC * FRM customers").succeeded());
+    EXPECT_EQ(only_record(h.audit).outcome(), core::AuditOutcome::ParsingFailure);
+    EXPECT_EQ(tables_of(h.audit).state, core::AuditTableState::Absent);
+}
+
+TEST(ProxyServiceTest, UnsafeTableMetadataIsOmittedWithoutChangingTheResponse) {
+    // A qualified name is ambiguous, so the metadata is dropped. The client
+    // result must be identical to the same query with a plain name.
+    FakeParserHarness h;
+    ports::ParseResult parse = parsed_select({"id"});
+    parse.statements[0].tables = {{"public", "customers"}};
+    h.parser->result_to_return = parse;
+    h.executor.result_to_return = ok_result({"id"}, {{Cell{"1"}}});
+
+    const core::ServiceResult result = h.service->handle("SELECT id FROM public.customers");
+
+    ASSERT_TRUE(result.succeeded());
+    EXPECT_EQ(result.result().column_names, (std::vector<std::string>{"id"}));
+    EXPECT_EQ(result.result().rows[0][0], Cell{"1"});
+    EXPECT_EQ(tables_of(h.audit).state, core::AuditTableState::Omitted);
+    EXPECT_TRUE(tables_of(h.audit).tables.empty());
+}
+
 // --- Unexpected failures ------------------------------------------------------
 
 TEST(ProxyServiceTest, UnexpectedParserExceptionBecomesInternalFailure) {

@@ -20,9 +20,12 @@
 
 namespace {
 
+core::SuccessDetails sample_success_details() {
+    return core::SuccessDetails{core::StatementType::Select, 4, 5, {1, 1, 1}};
+}
+
 core::AuditRecord sample_success() {
-    return core::AuditRecord::success(
-        1785664800000, 42, {core::StatementType::Select, 4, 5, {1, 1, 1}});
+    return core::AuditRecord::success(1785664800000, 42, sample_success_details());
 }
 
 std::set<std::string> keys_of(const nlohmann::json& j) {
@@ -139,13 +142,60 @@ TEST(AuditSerializationTest, WriteSuccessHasExactFields) {
     }
 }
 
+TEST(AuditSerializationTest, ReferencedTablesSerializationForEachState) {
+    // Present: the array, and no omission flag.
+    const nlohmann::json present = audit_adapter::serialize(
+        core::AuditRecord::success(1, 1, sample_success_details(),
+                                   {"customers", "orders"}));
+    EXPECT_EQ(present["referenced_tables"],
+              nlohmann::json::array({"customers", "orders"}));
+    EXPECT_FALSE(present.contains("referenced_tables_omitted"));
+
+    // Omitted: the flag, and no array.
+    const nlohmann::json omitted = audit_adapter::serialize(
+        core::AuditRecord::success(1, 2, sample_success_details(),
+                                   {"public.customers"}));
+    EXPECT_EQ(omitted["referenced_tables_omitted"], true);
+    EXPECT_FALSE(omitted.contains("referenced_tables"));
+
+    // Absent: neither key.
+    const nlohmann::json absent =
+        audit_adapter::serialize(core::AuditRecord::success(1, 3, sample_success_details()));
+    EXPECT_FALSE(absent.contains("referenced_tables"));
+    EXPECT_FALSE(absent.contains("referenced_tables_omitted"));
+
+    const nlohmann::json parse_failure =
+        audit_adapter::serialize(core::AuditRecord::parsing_failure(1, 4));
+    EXPECT_FALSE(parse_failure.contains("referenced_tables"));
+    EXPECT_FALSE(parse_failure.contains("referenced_tables_omitted"));
+}
+
+TEST(AuditSerializationTest, InvalidUtf8IdentifierNeverReachesStrictDump) {
+    // dump() throws on invalid UTF-8, and the repository turns that into a
+    // write failure, so a name like this would cost the whole audit line.
+    // Validation must stop it before serialization.
+    std::string hostile;
+    hostile.push_back('a');
+    hostile.push_back(static_cast<char>(0xFF));
+    hostile.push_back(static_cast<char>(0xEB));
+
+    const core::AuditRecord record =
+        core::AuditRecord::success(1, 1, sample_success_details(), {hostile});
+    EXPECT_EQ(record.referenced_tables().state, core::AuditTableState::Omitted);
+
+    std::string line;
+    EXPECT_NO_THROW(line = audit_adapter::serialize(record).dump());
+    EXPECT_EQ(line.find('\xFF'), std::string::npos);
+    EXPECT_NE(line.find("referenced_tables_omitted"), std::string::npos);
+}
+
 TEST(AuditSerializationTest, AllKeysStayInsideClosedSchema) {
     const std::set<std::string> allowed{
         "timestamp",         "request_id",       "outcome",
         "statement_type",    "row_count",        "column_count",
         "pii_email_columns", "pii_phone_columns", "pii_credit_card_columns",
         "reason",            "statement_count",  "category",
-        "affected_rows"};
+        "affected_rows",     "referenced_tables", "referenced_tables_omitted"};
     const std::vector<core::AuditRecord> records = {
         sample_success(),
         core::AuditRecord::write_success(1, 6, {core::StatementType::Insert, 1}),

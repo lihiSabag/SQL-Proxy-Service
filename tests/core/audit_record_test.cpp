@@ -130,6 +130,123 @@ TEST(AuditRecordTest, SelectOnlyFactoriesRejectNonSelect) {
                  std::invalid_argument);
 }
 
+// === Referenced-table metadata =============================================
+//
+// The full validation matrix lives here. Other layers only check that the
+// metadata reaches a record; they do not repeat these cases.
+
+namespace {
+
+// Builds a record through a real factory so validation cannot be bypassed.
+core::AuditTableMetadata metadata_for(std::vector<std::string> names) {
+    return core::AuditRecord::success(1, 1, valid_success(), std::move(names))
+        .referenced_tables();
+}
+
+}  // namespace
+
+TEST(AuditTableMetadataTest, ValidNamesArePresentAndPreserveOrder) {
+    const core::AuditTableMetadata m = metadata_for({"customers", "orders"});
+    EXPECT_EQ(m.state, core::AuditTableState::Present);
+    EXPECT_EQ(m.tables, std::vector<std::string>({"customers", "orders"}));
+
+    // Underscores, digits, dollar signs and a leading underscore are legal.
+    EXPECT_EQ(metadata_for({"_tmp$1", "Orders2"}).state,
+              core::AuditTableState::Present);
+
+    // Exactly at the limits.
+    EXPECT_EQ(metadata_for({std::string(63, 'a')}).state,
+              core::AuditTableState::Present);
+    EXPECT_EQ(metadata_for({"t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"}).state,
+              core::AuditTableState::Present);
+}
+
+TEST(AuditTableMetadataTest, EmptyListIsAbsent) {
+    const core::AuditTableMetadata m = metadata_for({});
+    EXPECT_EQ(m.state, core::AuditTableState::Absent);
+    EXPECT_TRUE(m.tables.empty());
+}
+
+TEST(AuditTableMetadataTest, AnyUnsafeOrAmbiguousNameOmitsTheWholeList) {
+    const std::vector<std::vector<std::string>> rejected = {
+        {"public.customers"},              // qualified: ambiguous
+        {"customers", "public.orders"},    // one bad name poisons the list
+        {"a b"},                           // space
+        {std::string("a\tb")},             // control character
+        {std::string("a\xFF\xEB")},        // invalid UTF-8, would break dump()
+        {"1customers"},                    // leading digit
+        {"$customers"},                    // leading dollar
+        {""},                              // empty
+        {std::string(64, 'a')},            // one byte over the length limit
+        {"cust-omers"},                    // hyphen
+        {"\"orders\""},                    // embedded quotes
+    };
+    for (const std::vector<std::string>& names : rejected) {
+        SCOPED_TRACE(names.empty() ? "(empty)" : names.front());
+        const core::AuditTableMetadata m = metadata_for(names);
+        EXPECT_EQ(m.state, core::AuditTableState::Omitted);
+        EXPECT_TRUE(m.tables.empty()) << "nothing may be retained on omission";
+    }
+}
+
+TEST(AuditTableMetadataTest, MoreThanEightNamesIsOmitted) {
+    const core::AuditTableMetadata m =
+        metadata_for({"t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9"});
+    EXPECT_EQ(m.state, core::AuditTableState::Omitted);
+    EXPECT_TRUE(m.tables.empty());
+}
+
+TEST(AuditTableMetadataTest, StateDependsOnlyOnTheNameList) {
+    // A rejected DDL statement still reports Present when its table list is
+    // safe: the state is not derived from the outcome or the reason.
+    const core::AuditRecord rejected = core::AuditRecord::policy_rejected(
+        1, 1, {core::RejectReason::DdlNotAllowed, core::StatementType::Drop, 1},
+        {"customers"});
+    EXPECT_EQ(rejected.referenced_tables().state, core::AuditTableState::Present);
+    EXPECT_EQ(rejected.referenced_tables().tables,
+              std::vector<std::string>({"customers"}));
+
+    // And an ordinary success reports Omitted when its list is unsafe.
+    EXPECT_EQ(metadata_for({"public.customers"}).state,
+              core::AuditTableState::Omitted);
+}
+
+TEST(AuditTableMetadataTest, IneligibleOutcomesAreAlwaysAbsent) {
+    // These factories take no table parameter at all, so the metadata cannot
+    // be supplied even by mistake.
+    EXPECT_EQ(core::AuditRecord::parsing_failure(1, 1).referenced_tables().state,
+              core::AuditTableState::Absent);
+    EXPECT_EQ(core::AuditRecord::internal_failure(1, 2).referenced_tables().state,
+              core::AuditTableState::Absent);
+}
+
+TEST(AuditTableMetadataTest, EveryEligibleFactoryAcceptsMetadata) {
+    const std::vector<std::string> names{"orders"};
+    EXPECT_EQ(core::AuditRecord::success(1, 1, valid_success(), names)
+                  .referenced_tables().state,
+              core::AuditTableState::Present);
+    EXPECT_EQ(core::AuditRecord::write_success(
+                  1, 2, {core::StatementType::Insert, 1}, names)
+                  .referenced_tables().state,
+              core::AuditTableState::Present);
+    EXPECT_EQ(core::AuditRecord::policy_rejected(
+                  1, 3,
+                  {core::RejectReason::DmlNotAllowed, core::StatementType::Update, 1},
+                  names)
+                  .referenced_tables().state,
+              core::AuditTableState::Present);
+    EXPECT_EQ(core::AuditRecord::database_failure(
+                  1, 4,
+                  {core::DbFailureCategory::ExecutionFailure, core::StatementType::Select},
+                  names)
+                  .referenced_tables().state,
+              core::AuditTableState::Present);
+    EXPECT_EQ(core::AuditRecord::masking_refused(
+                  1, 5, {core::StatementType::Select, 1}, names)
+                  .referenced_tables().state,
+              core::AuditTableState::Present);
+}
+
 TEST(AuditRecordTest, WriteSuccessCarriesAffectedRowsAndReportsSuccess) {
     const core::AuditRecord record =
         core::AuditRecord::write_success(1700000000000, 7,

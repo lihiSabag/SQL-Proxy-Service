@@ -2,7 +2,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <variant>
+#include <vector>
 
 #include "core/policy_decision.h"
 #include "core/sql_analysis.h"
@@ -22,6 +24,24 @@ enum class AuditOutcome {
 };
 
 const char* to_string(AuditOutcome outcome);
+
+// How much referenced-table metadata a record carries.
+//
+// Absent is the fail-closed default: a record that was never given a table
+// list reads as "not known", never as "no tables were referenced".
+enum class AuditTableState {
+    Absent,   // no analyzed table list was available
+    Present,  // every reported name passed validation
+    Omitted,  // a name or the count failed validation; nothing is kept
+};
+
+// Table names as the analyzer reported them. Validated on construction, so
+// an unchecked list cannot reach a record. `tables` is non-empty only when
+// state == Present.
+struct AuditTableMetadata {
+    AuditTableState state = AuditTableState::Absent;
+    std::vector<std::string> tables;
+};
 
 // Typed translation of ports::ExecutionStatus failure states.
 enum class DbFailureCategory {
@@ -53,10 +73,7 @@ struct SuccessDetails {
 
 // A completed write. Carries no result-set counts (there is none) and no
 // PII counts (nothing was classified or masked). affected_rows is the one
-// fact worth recording: it says how much changed. No table name is stored:
-// under the current policy an allowed write is always the one permitted
-// target, so the name adds nothing, and on any other path it would be
-// caller-controlled text.
+// fact worth recording: it says how much changed.
 struct WriteSuccessDetails {
     StatementType statement_type;  // must be Insert under the current policy
     std::size_t affected_rows = 0;
@@ -96,10 +113,12 @@ struct InternalFailureDetails {};
 // values inside an outcome with std::invalid_argument (programmer-contract
 // misuse):
 //   - policy_rejected(): reason must not be None or UnparseableSql;
-//   - success()/database_failure()/masking_refused(): statement_type must
-//     be Select — these outcomes are reachable only for SELECT under the
-//     read-only policy (revisit explicitly if that policy is ever
-//     relaxed).
+//   - success()/masking_refused(): statement_type must be Select, since
+//     both describe a masked result set;
+//   - write_success(): statement_type must be Insert, the only authorized
+//     write;
+//   - database_failure(): statement_type must be Select or Insert, because
+//     execution can fail on either path.
 //
 // timestamp_ms is UTC epoch milliseconds, supplied by the caller — there is
 // no clock port, and the repository never decides event time. request_id is
@@ -109,23 +128,31 @@ class AuditRecord {
 public:
     AuditRecord() = delete;
 
+    // Outcomes that follow a successful analysis take the analyzer's table
+    // list. ParsingFailure and InternalFailure take no such parameter, so
+    // their records are Absent by construction rather than by convention.
     static AuditRecord success(std::int64_t timestamp_ms,
-                               std::uint64_t request_id, SuccessDetails details);
+                               std::uint64_t request_id, SuccessDetails details,
+                               const std::vector<std::string>& referenced_tables = {});
     static AuditRecord write_success(std::int64_t timestamp_ms,
                                      std::uint64_t request_id,
-                                     WriteSuccessDetails details);
+                                     WriteSuccessDetails details,
+                                     const std::vector<std::string>& referenced_tables = {});
     static AuditRecord parsing_failure(std::int64_t timestamp_ms,
                                        std::uint64_t request_id,
                                        ParsingFailureDetails details = {});
     static AuditRecord policy_rejected(std::int64_t timestamp_ms,
                                        std::uint64_t request_id,
-                                       PolicyRejectedDetails details);
+                                       PolicyRejectedDetails details,
+                                       const std::vector<std::string>& referenced_tables = {});
     static AuditRecord database_failure(std::int64_t timestamp_ms,
                                         std::uint64_t request_id,
-                                        DatabaseFailureDetails details);
+                                        DatabaseFailureDetails details,
+                                        const std::vector<std::string>& referenced_tables = {});
     static AuditRecord masking_refused(std::int64_t timestamp_ms,
                                        std::uint64_t request_id,
-                                       MaskingRefusedDetails details);
+                                       MaskingRefusedDetails details,
+                                       const std::vector<std::string>& referenced_tables = {});
     static AuditRecord internal_failure(std::int64_t timestamp_ms,
                                         std::uint64_t request_id,
                                         InternalFailureDetails details = {});
@@ -137,6 +164,7 @@ public:
     bool is_write_success() const;
     std::int64_t timestamp_ms() const { return timestamp_ms_; }
     std::uint64_t request_id() const { return request_id_; }
+    const AuditTableMetadata& referenced_tables() const { return referenced_tables_; }
 
     // Wrong-state access throws std::bad_variant_access — a detail can
     // never be silently read from a record of a different outcome.
@@ -152,11 +180,14 @@ private:
                      PolicyRejectedDetails, DatabaseFailureDetails,
                      MaskingRefusedDetails, InternalFailureDetails>;
 
+    // Validates referenced_tables; see classify_tables in the .cpp.
     AuditRecord(std::int64_t timestamp_ms, std::uint64_t request_id,
-                Details details);
+                Details details,
+                const std::vector<std::string>& referenced_tables = {});
 
     std::int64_t timestamp_ms_;
     std::uint64_t request_id_;
+    AuditTableMetadata referenced_tables_;
     Details details_;
 };
 

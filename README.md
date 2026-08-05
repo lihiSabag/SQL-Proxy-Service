@@ -206,11 +206,11 @@ An audit trail should record request outcomes without becoming another source of
 
 Every request handled by the SQL pipeline produces one structured JSON Lines audit record.
 
-The record uses closed enums and numeric fields. It intentionally excludes:
+The record uses closed enums and numeric fields, plus a validated list of referenced table names. It excludes:
 
 - raw or normalized SQL;
-- query values;
-- table and column names;
+- query values and literals;
+- column names and aliases;
 - result values;
 - database error messages;
 - connection strings;
@@ -218,9 +218,25 @@ The record uses closed enums and numeric fields. It intentionally excludes:
 
 Successful results are not returned if the audit record cannot be persisted.
 
+**Referenced tables**
+
+Records that follow a successful analysis carry the tables the statement named, so the trail can answer which tables a request touched:
+
+```json
+{"outcome":"SUCCESS","statement_type":"SELECT","referenced_tables":["customers","orders"], ...}
+{"outcome":"POLICY_REJECTED","reason":"SYSTEM_TABLE_ACCESS","referenced_tables":["pg_authid"], ...}
+{"outcome":"SUCCESS","statement_type":"SELECT","referenced_tables_omitted":true, ...}
+```
+
+A name is recorded only if it is a plain unqualified ASCII identifier: 1 to 63 bytes, starting with a letter or underscore, continuing with letters, digits, underscores or dollar signs. At most eight names are kept. Qualified references such as `public.customers`, and anything containing a dot, whitespace, a control character or a byte outside that set, fail the check.
+
+Validation is all-or-nothing. If any name fails, or there are too many, the whole list is dropped and the record carries `"referenced_tables_omitted": true` instead. Names are never truncated, and a partial list is never written, because a partial list would read as a complete one. When no analyzed tables exist, such as after a parse failure, neither key appears: the trail never claims "no tables" when the truth is "not known". Parsing failures and internal failures never carry the metadata at all, because their record factories do not accept it.
+
+**Omitting the metadata never changes the SQL request.** The policy decision, the HTTP status and the response body are identical either way.
+
 **Trade-off**
 
-Excluding SQL and identifiers reduces forensic detail. This is an intentional privacy decision. The audit records what happened to the request, not its full payload.
+Recording table names adds forensic value but widens what the audit stores. The strict whitelist is what keeps that safe: a rejected statement's table name is caller-controlled text, and without validation a crafted identifier could break strict JSON serialization and cost the entire audit line. Column names remain excluded, since they are more numerous and sit closer to the data than table names do.
 
 ### System log
 

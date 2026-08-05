@@ -192,6 +192,42 @@ void validate_audit_line(const Json& line) {
     for (auto it = line.begin(); it != line.end(); ++it) {
         actual_keys.insert(it.key());
     }
+
+    // Referenced-table metadata is optional on every outcome that can carry
+    // it, so it is checked separately and removed before the closed-schema
+    // comparison. The two keys are mutually exclusive by contract.
+    const bool has_tables = actual_keys.erase("referenced_tables") == 1;
+    const bool has_omitted = actual_keys.erase("referenced_tables_omitted") == 1;
+    EXPECT_FALSE(has_tables && has_omitted)
+        << "referenced_tables and referenced_tables_omitted must not co-occur";
+    if (has_omitted) {
+        EXPECT_TRUE(line["referenced_tables_omitted"].is_boolean());
+        EXPECT_TRUE(line["referenced_tables_omitted"].get<bool>());
+    }
+    if (has_tables) {
+        ASSERT_TRUE(line["referenced_tables"].is_array());
+        const auto& names = line["referenced_tables"];
+        EXPECT_LE(names.size(), 8u);
+        for (const Json& entry : names) {
+            ASSERT_TRUE(entry.is_string());
+            const std::string name = entry.get<std::string>();
+            EXPECT_FALSE(name.empty());
+            EXPECT_LE(name.size(), 63u);
+            // Plain unqualified ASCII identifier: no dots, no whitespace, no
+            // control characters, no byte outside the whitelist.
+            const unsigned char first = static_cast<unsigned char>(name.front());
+            EXPECT_TRUE((first >= 'A' && first <= 'Z') ||
+                        (first >= 'a' && first <= 'z') || first == '_')
+                << "bad first byte in referenced table: " << name;
+            for (char raw : name) {
+                const unsigned char c = static_cast<unsigned char>(raw);
+                EXPECT_TRUE((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                            (c >= '0' && c <= '9') || c == '_' || c == '$')
+                    << "bad byte in referenced table: " << name;
+            }
+        }
+    }
+
     const std::string statement_type =
         line.contains("statement_type") ? line["statement_type"].get<std::string>() : "";
     EXPECT_EQ(actual_keys, expected_keys_for(outcome, statement_type))
@@ -887,6 +923,79 @@ TEST_F(EndToEndTest, InsertShapesTheParserRefusesAreBadRequests) {
     }
 
     EXPECT_EQ(scalar("SELECT COUNT(*) FROM orders"), before);
+}
+
+// === Referenced-table metadata ==============================================
+
+TEST_F(EndToEndTest, SelectRecordsItsReferencedTables) {
+    const httplib::Response response =
+        post("SELECT c.id, o.amount FROM customers c JOIN orders o "
+             "ON c.id = o.customer_id ORDER BY o.id");
+
+    ASSERT_EQ(response.status, 200);
+    const Json audit = only_audit_line();
+    EXPECT_EQ(audit["outcome"], "SUCCESS");
+    EXPECT_EQ(audit["referenced_tables"], Json::array({"customers", "orders"}));
+    EXPECT_FALSE(audit.contains("referenced_tables_omitted"));
+}
+
+TEST_F(EndToEndTest, SystemCatalogRejectionRecordsTheProbedTable) {
+    // The forensic payoff: the trail now shows which catalog was probed.
+    const httplib::Response response = post("SELECT * FROM pg_authid");
+
+    EXPECT_EQ(response.status, 403);
+    const Json audit = only_audit_line();
+    EXPECT_EQ(audit["outcome"], "POLICY_REJECTED");
+    EXPECT_EQ(audit["reason"], "SYSTEM_TABLE_ACCESS");
+    EXPECT_EQ(audit["referenced_tables"], Json::array({"pg_authid"}));
+}
+
+TEST_F(EndToEndTest, QualifiedTableNameIsOmittedButTheQueryStillSucceeds) {
+    // A schema-qualified reference is ambiguous, so the metadata is dropped.
+    // The client result is unaffected.
+    const httplib::Response response =
+        post("SELECT id FROM public.customers ORDER BY id LIMIT 1");
+
+    ASSERT_EQ(response.status, 200);
+    EXPECT_EQ(body_of(response)["rows"], Json::array({Json::array({"1"})}));
+
+    const Json audit = only_audit_line();
+    EXPECT_EQ(audit["outcome"], "SUCCESS");
+    EXPECT_EQ(audit["referenced_tables_omitted"], true);
+    EXPECT_FALSE(audit.contains("referenced_tables"));
+}
+
+TEST_F(EndToEndTest, NonAsciiIdentifierIsOmittedAndTheRecordSurvives) {
+    // A quoted identifier can legally carry non-ASCII bytes. They are valid
+    // UTF-8, so they survive JSON parsing and reach the analyzer, but they
+    // are outside the audit whitelist, so the metadata is dropped rather
+    // than written. The audit line itself is still produced.
+    const httplib::Response response = post("SELECT * FROM \"caf\xC3\xA9\"");
+
+    EXPECT_NE(response.status, 200);  // no such relation
+
+    const Json audit = only_audit_line();
+    EXPECT_TRUE(audit.contains("outcome"));
+    EXPECT_EQ(audit["referenced_tables_omitted"], true);
+    EXPECT_FALSE(audit.contains("referenced_tables"));
+    // No byte of the identifier reaches the trail.
+    EXPECT_EQ(audit.dump().find("caf"), std::string::npos);
+}
+
+TEST_F(EndToEndTest, ReferencedTablesCarryNoSqlOrLiterals) {
+    const httplib::Response response =
+        post("SELECT id FROM customers WHERE email = 'zzq-canary-9137@example.com'");
+
+    ASSERT_EQ(response.status, 200);
+    const Json audit = only_audit_line();
+    EXPECT_EQ(audit["referenced_tables"], Json::array({"customers"}));
+
+    // Only the table name is recorded: no literal, no predicate, no column.
+    const std::string raw = audit.dump();
+    for (const char* forbidden : {"zzq-canary-9137", "@example.com", "WHERE",
+                                  "SELECT id", "'"}) {
+        EXPECT_EQ(raw.find(forbidden), std::string::npos) << forbidden;
+    }
 }
 
 // === Database failures ======================================================

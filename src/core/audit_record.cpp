@@ -35,6 +35,65 @@ const char* to_string(DbFailureCategory category) {
 
 namespace {
 
+// 63 bytes is PostgreSQL's own identifier length. 8 names is well above
+// what any statement the policy allows can reference.
+constexpr std::size_t kMaxReferencedTables = 8;
+constexpr std::size_t kMaxTableNameLength = 63;
+
+// Accepts a plain unqualified ASCII identifier and nothing else.
+//
+// The whitelist is the security boundary. Rejected names are caller
+// controlled, and dots, whitespace, control characters and bytes >= 0x80 all
+// fall outside it, so nothing that could break strict JSON serialization or
+// forge a log line can enter a record. No separate UTF-8 check is needed.
+bool is_valid_table_name(const std::string& name) {
+    if (name.empty() || name.size() > kMaxTableNameLength) {
+        return false;
+    }
+    const unsigned char first = static_cast<unsigned char>(name.front());
+    const bool first_ok = (first >= 'A' && first <= 'Z') ||
+                          (first >= 'a' && first <= 'z') || first == '_';
+    if (!first_ok) {
+        return false;
+    }
+    for (std::size_t i = 1; i < name.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(name[i]);
+        const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                        (c >= '0' && c <= '9') || c == '_' || c == '$';
+        if (!ok) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The only place table names are judged, called from the constructor so no
+// factory can bypass it.
+//
+// All-or-nothing: a partial list would read as a complete one, and a
+// truncated name would be an identifier that never existed. The state
+// depends on the name list alone, never on the outcome or reject reason.
+AuditTableMetadata classify_tables(const std::vector<std::string>& names) {
+    AuditTableMetadata metadata;
+    if (names.empty()) {
+        metadata.state = AuditTableState::Absent;
+        return metadata;
+    }
+    if (names.size() > kMaxReferencedTables) {
+        metadata.state = AuditTableState::Omitted;
+        return metadata;
+    }
+    for (const std::string& name : names) {
+        if (!is_valid_table_name(name)) {
+            metadata.state = AuditTableState::Omitted;
+            return metadata;  // nothing retained
+        }
+    }
+    metadata.state = AuditTableState::Present;
+    metadata.tables = names;
+    return metadata;
+}
+
 // Success (with a result set) and MaskingRefused are reachable only for
 // SELECT: both describe a classified, masked result, which a write never
 // produces. Enforced here as a factory contract.
@@ -71,23 +130,29 @@ void require_select_or_insert(StatementType type, const char* factory) {
 }  // namespace
 
 AuditRecord::AuditRecord(std::int64_t timestamp_ms, std::uint64_t request_id,
-                         Details details)
+                         Details details,
+                         const std::vector<std::string>& referenced_tables)
     : timestamp_ms_(timestamp_ms),
       request_id_(request_id),
+      referenced_tables_(classify_tables(referenced_tables)),
       details_(std::move(details)) {}
 
 AuditRecord AuditRecord::success(std::int64_t timestamp_ms,
                                  std::uint64_t request_id,
-                                 SuccessDetails details) {
+                                 SuccessDetails details,
+                                 const std::vector<std::string>& referenced_tables) {
     require_select(details.statement_type, "success");
-    return AuditRecord(timestamp_ms, request_id, Details(std::move(details)));
+    return AuditRecord(timestamp_ms, request_id, Details(std::move(details)),
+                       referenced_tables);
 }
 
 AuditRecord AuditRecord::write_success(std::int64_t timestamp_ms,
                                        std::uint64_t request_id,
-                                       WriteSuccessDetails details) {
+                                       WriteSuccessDetails details,
+                                       const std::vector<std::string>& referenced_tables) {
     require_insert(details.statement_type, "write_success");
-    return AuditRecord(timestamp_ms, request_id, Details(details));
+    return AuditRecord(timestamp_ms, request_id, Details(details),
+                       referenced_tables);
 }
 
 AuditRecord AuditRecord::parsing_failure(std::int64_t timestamp_ms,
@@ -98,7 +163,8 @@ AuditRecord AuditRecord::parsing_failure(std::int64_t timestamp_ms,
 
 AuditRecord AuditRecord::policy_rejected(std::int64_t timestamp_ms,
                                          std::uint64_t request_id,
-                                         PolicyRejectedDetails details) {
+                                         PolicyRejectedDetails details,
+                                         const std::vector<std::string>& referenced_tables) {
     if (details.reason == RejectReason::None ||
         details.reason == RejectReason::NotEvaluated) {
         throw std::invalid_argument(
@@ -112,21 +178,26 @@ AuditRecord AuditRecord::policy_rejected(std::int64_t timestamp_ms,
             "parser failures are audited as ParsingFailure, not as "
             "PolicyRejected");
     }
-    return AuditRecord(timestamp_ms, request_id, Details(std::move(details)));
+    return AuditRecord(timestamp_ms, request_id, Details(std::move(details)),
+                       referenced_tables);
 }
 
 AuditRecord AuditRecord::database_failure(std::int64_t timestamp_ms,
                                           std::uint64_t request_id,
-                                          DatabaseFailureDetails details) {
+                                          DatabaseFailureDetails details,
+                                          const std::vector<std::string>& referenced_tables) {
     require_select_or_insert(details.statement_type, "database_failure");
-    return AuditRecord(timestamp_ms, request_id, Details(details));
+    return AuditRecord(timestamp_ms, request_id, Details(details),
+                       referenced_tables);
 }
 
 AuditRecord AuditRecord::masking_refused(std::int64_t timestamp_ms,
                                          std::uint64_t request_id,
-                                         MaskingRefusedDetails details) {
+                                         MaskingRefusedDetails details,
+                                         const std::vector<std::string>& referenced_tables) {
     require_select(details.statement_type, "masking_refused");
-    return AuditRecord(timestamp_ms, request_id, Details(details));
+    return AuditRecord(timestamp_ms, request_id, Details(details),
+                       referenced_tables);
 }
 
 AuditRecord AuditRecord::internal_failure(std::int64_t timestamp_ms,

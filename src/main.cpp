@@ -1,3 +1,8 @@
+// Process entry point. It reads configuration from the environment, builds the
+// concrete components, and hands them to the HTTP server. All the request
+// logic lives in ProxyService and the adapters, so this file only wires things
+// together and decides when to exit with a failure code.
+
 #include <cstdlib>
 #include <memory>
 #include <string>
@@ -14,8 +19,8 @@
 
 namespace {
 
-// Small, non-failing lookup with a safe default — deliberately not a new
-// configuration subsystem.
+// The audit path is the one setting that cannot fail to resolve: an unset or
+// empty value falls back to this file rather than stopping startup.
 constexpr const char* kDefaultAuditLogPath = "audit.jsonl";
 
 std::string resolve_audit_log_path() {
@@ -29,8 +34,10 @@ std::string resolve_audit_log_path() {
 }  // namespace
 
 int main() {
+    // Logging is set up first so that configuration errors can be reported.
     system_log::init();
 
+    // PORT is optional and falls back to a default.
     config::PortResolution port_resolution = config::resolve_port(std::getenv("PORT"));
 
     if (!port_resolution.valid) {
@@ -52,11 +59,16 @@ int main() {
         "Starting sql-proxy-service (port source: {})",
         port_resolution.source == config::PortSource::Environment ? "PORT env var" : "default");
 
+    // The only place the concrete adapters are chosen. Each one is created
+    // here and passed in by reference, so the core keeps depending on its
+    // interfaces and every component stays alive for as long as the server.
     core::SqlAnalyzer analyzer(std::make_unique<parser_adapter::HyriseSqlParser>());
     postgres_adapter::PostgresQueryExecutor executor(database_resolution.config);
     audit_adapter::JsonlAuditRepository audit(resolve_audit_log_path());
     core::ProxyService proxy(analyzer, executor, audit);
 
+    // Blocks until the process is stopped, or returns false if the port could
+    // not be bound.
     http_adapter::HttpServer server(proxy);
     bool clean_exit = server.run(port_resolution.port);
 

@@ -106,7 +106,8 @@ ProxyService::Processing ProxyService::process(const std::string& sql,
             AuditRecord::policy_rejected(
                 timestamp_ms, request_id,
                 {decision.reason, analysis.statement_type,
-                 checked_count(analysis.statement_count, "statement_count")})};
+                 checked_count(analysis.statement_count, "statement_count")},
+                analysis.tables)};
     }
 
     ports::ExecutionResult execution = executor_.execute(sql);
@@ -121,7 +122,8 @@ ProxyService::Processing ProxyService::process(const std::string& sql,
                 timestamp_ms, request_id,
                 {connection ? DbFailureCategory::ConnectionFailure
                             : DbFailureCategory::ExecutionFailure,
-                 analysis.statement_type})};
+                 analysis.statement_type},
+                analysis.tables)};
     }
 
     // An authorized write produces no result set, so classification and
@@ -142,7 +144,8 @@ ProxyService::Processing ProxyService::process(const std::string& sql,
         return Processing{
             ServiceResult::write_success(WriteResult{affected}),
             AuditRecord::write_success(timestamp_ms, request_id,
-                                       {analysis.statement_type, affected})};
+                                       {analysis.statement_type, affected},
+                                       analysis.tables)};
     }
 
     // Captured BEFORE the executor result is moved into the masker; the
@@ -162,7 +165,8 @@ ProxyService::Processing ProxyService::process(const std::string& sql,
             return Processing{
                 ServiceResult::failure(ServiceFailure::MaskingRefused),
                 AuditRecord::masking_refused(timestamp_ms, request_id,
-                                             {analysis.statement_type, column_count})};
+                                             {analysis.statement_type, column_count},
+                                             analysis.tables)};
         }
         // StructuralMismatch / InvalidClassification are upstream contract
         // violations — programmer bugs, audited as internal failures.
@@ -174,7 +178,8 @@ ProxyService::Processing ProxyService::process(const std::string& sql,
         ServiceResult::success(to_masked_result(masked.result())),
         AuditRecord::success(timestamp_ms, request_id,
                              {analysis.statement_type, row_count, column_count,
-                              summarize(classification)})};
+                              summarize(classification)},
+                             analysis.tables)};
 }
 
 ports::AuditAppendResult ProxyService::append_safely(const AuditRecord& record) {

@@ -23,6 +23,19 @@ nlohmann::json serialize(const core::AuditRecord& record) {
     j["request_id"] = record.request_id();
     j["outcome"] = core::to_string(record.outcome());
 
+    // Present and Omitted are mutually exclusive, and Absent writes neither
+    // key, so a record never claims "no tables" when the truth is "not known".
+    switch (record.referenced_tables().state) {
+        case core::AuditTableState::Present:
+            j["referenced_tables"] = record.referenced_tables().tables;
+            break;
+        case core::AuditTableState::Omitted:
+            j["referenced_tables_omitted"] = true;
+            break;
+        case core::AuditTableState::Absent:
+            break;
+    }
+
     switch (record.outcome()) {
         case core::AuditOutcome::Success: {
             // Two shapes share this outcome. A write has no result set, so it
