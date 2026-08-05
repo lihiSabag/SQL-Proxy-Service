@@ -44,13 +44,32 @@ RUN git clone https://github.com/microsoft/vcpkg /opt/vcpkg \
 
 WORKDIR /src
 
+# --- Target architecture ----------------------------------------------------
+# TARGETARCH is set by BuildKit to the architecture being built (amd64 on an
+# Intel host, arm64 on Apple Silicon). dpkg is only a fallback for builders
+# that do not provide it. The resolved triplet is written to a file so that
+# vcpkg and CMake below use the same value; letting CMake detect the
+# architecture on its own would make it look in a directory vcpkg never
+# populated.
+ARG TARGETARCH
+RUN set -eu; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in \
+        amd64) triplet=x64-linux ;; \
+        arm64) triplet=arm64-linux ;; \
+        *) echo "ERROR: unsupported architecture '$arch' (supported: amd64, arm64)" >&2; \
+           exit 1 ;; \
+    esac; \
+    printf '%s\n' "$triplet" > /vcpkg-triplet; \
+    echo "Building for $arch using vcpkg triplet $triplet"
+
 # --- Dependency layer -------------------------------------------------------
 # vcpkg.json is copied alone and the dependencies installed first, so editing
 # src/ or tests/ does not invalidate the slow dependency build. Manifest mode
 # installs to <cwd>/vcpkg_installed, i.e. /src/vcpkg_installed; the configure
 # step below points at that directory and skips a second install.
 COPY vcpkg.json ./
-RUN /opt/vcpkg/vcpkg install --triplet=x64-linux
+RUN /opt/vcpkg/vcpkg install --triplet="$(cat /vcpkg-triplet)"
 
 # --- Source layer -----------------------------------------------------------
 # tests/ is copied because CMakeLists.txt lists the test sources in
@@ -66,6 +85,7 @@ RUN cmake -S . -B build \
         -DCMAKE_TOOLCHAIN_FILE=/opt/vcpkg/scripts/buildsystems/vcpkg.cmake \
         -DVCPKG_INSTALLED_DIR=/src/vcpkg_installed \
         -DVCPKG_MANIFEST_INSTALL=OFF \
+        -DVCPKG_TARGET_TRIPLET="$(cat /vcpkg-triplet)" \
     && cmake --build build --target sql_proxy_service -j"$(nproc)" \
     && strip build/sql_proxy_service
 
