@@ -19,7 +19,7 @@ std::string format_utc_timestamp(std::int64_t epoch_ms);
 
 // Serializes one AuditRecord to its closed-schema JSON object. Field names
 // are compile-time literals; values are enums (via the closed to_string
-// tables) and integers — no user-controlled string can appear. Inapplicable
+// tables) and integers, no user-controlled string can appear. Inapplicable
 // fields are OMITTED entirely, never emitted as null/empty/zero
 // placeholders. Exposed for tests; JsonlAuditRepository uses it internally.
 nlohmann::json serialize(const core::AuditRecord& record);
@@ -29,7 +29,7 @@ nlohmann::json serialize(const core::AuditRecord& record);
 // Guarantees (stated honestly):
 //   - append mode; the file is created if missing; existing contents are
 //     preserved; a pre-existing malformed line never affects appends
-//     (append-only — the file is never read); an empty file is valid;
+//     (append-only, the file is never read); an empty file is valid;
 //   - Ok only after write + flush to the OS stream (no fsync claim);
 //   - thread-safe within ONE service process via an instance-owned mutex;
 //     no multi-process atomicity, no crash-mid-write recovery (a torn

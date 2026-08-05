@@ -18,7 +18,7 @@ enum class StatementType {
 
 enum class StatementClass { Select, Dml, Ddl, Unknown };
 
-// Derived from StatementType, never stored independently — cannot drift.
+// Derived from StatementType, never stored independently, so it cannot drift.
 StatementClass statement_class_of(StatementType type);
 
 const char* to_string(StatementType type);
@@ -61,16 +61,13 @@ struct SqlAnalysis {
     int statement_count = 0;  // parsed statement count; >1 with MultipleStatements
 
     // "schema.table" or "table", deduplicated, first-seen order preserved.
-    // Identifier spelling is preserved exactly as the parser resolved it,
-    // permanently: the parser does not expose whether an
-    // identifier was quoted and never case-folds, so PostgreSQL-accurate
-    // case normalization is not possible anywhere in this design. Comparisons
-    // against these names are case-sensitive — a documented limitation.
+    // Spelling is preserved exactly as the parser resolved it: it never
+    // case-folds and does not report whether an identifier was quoted, so
+    // PostgreSQL-accurate case normalization is not possible here.
     std::vector<std::string> tables;
 
-    // SELECT only. Plain column identifiers only — computed expressions never
-    // appear here; they set has_computed_projection instead. A mixed projection
-    // has both entries here and the flag set.
+    // SELECT only. Plain column identifiers only: computed expressions set
+    // has_computed_projection instead. A mixed projection sets both.
     std::vector<std::string> projection_columns;
     bool has_wildcard_projection = false;  // SELECT * (or t.*)
     bool has_computed_projection = false;
@@ -98,8 +95,8 @@ struct SqlAnalysis {
 
     std::vector<std::string> unsupported_features;
 
-    // ParseError only. Carries the sanitized reason from ParseResult::error —
-    // see the ISqlParser contract; never raw SQL or literal values.
+    // ParseError only. Carries the sanitized reason from ParseResult::error,
+    // never raw SQL or literal values.
     std::string error_reason;
 };
 

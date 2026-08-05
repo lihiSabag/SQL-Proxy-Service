@@ -6,7 +6,7 @@
 namespace core {
 
 // The supported classification categories. to_string returns the canonical
-// tags ("PII.Email", ...) — a closed vocabulary, so a classification can
+// tags ("PII.Email", ...), a closed vocabulary, so a classification can
 // never echo data or identifiers.
 enum class PiiCategory {
     Email,
@@ -16,7 +16,7 @@ enum class PiiCategory {
 
 const char* to_string(PiiCategory category);
 
-// Three states, deliberately not two: NotClassifiedAsPii means "examined and
+// Three states, not two: NotClassifiedAsPii means "examined and
 // not sensitive"; Unattributed means "could not determine what this column
 // carries". Collapsing them is exactly the bug that would let unattributable
 // data flow downstream unmasked.

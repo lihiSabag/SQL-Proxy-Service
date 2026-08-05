@@ -15,20 +15,13 @@ enum class MaskingFailureReason {
                             // invariants broken
 };
 
-// Closed vocabulary for later audit integration. Never contains SQL, column
-// names, row values, or cell values — the enum is the entire message.
+// Closed vocabulary: never contains SQL, names, or values.
 const char* to_string(MaskingFailureReason reason);
 
-// Success-or-failure by TYPE: a failure cannot carry an ExecutionResult, so
-// no caller can reach unmasked or partially masked data through a failure
-// outcome. The only result eligible to leave this component is the fully
-// masked success value.
-//
-// Deliberately NOT a bare std::variant alias: a
-// default-constructed variant would hold a default ExecutionResult and
-// masquerade as a successful masking outcome that PiiMasker never produced.
-// This wrapper cannot be default-constructed — an outcome exists only via
-// the explicit success()/failure() factories.
+// Success-or-failure by type: a failure cannot carry an ExecutionResult, so
+// no caller can reach unmasked or partially masked data through a failure.
+// Not default-constructible, since a default would masquerade as a success
+// the masker never produced.
 class MaskingOutcome {
 public:
     MaskingOutcome() = delete;
@@ -45,7 +38,7 @@ public:
     }
 
     // Valid only when masked(); wrong-state access throws
-    // std::bad_variant_access — it can never silently yield a result for a
+    // std::bad_variant_access, it can never silently yield a result for a
     // failure (or a reason for a success).
     const ports::ExecutionResult& result() const {
         return std::get<ports::ExecutionResult>(value_);
@@ -61,34 +54,28 @@ private:
 };
 
 // Concrete class: transforms result values according to the classifications
-// produced by DataClassifier. It never re-classifies —
+// produced by DataClassifier. It never re-classifies:
 // a cell value is inspected only to apply the already-selected
 // transformation, never to decide whether a column is PII. It contains no
 // logging (it is the one component guaranteed to hold raw PII).
 //
-// Ownership: the caller passes the raw ExecutionResult by value (std::move),
-// which transfers logical ownership, reduces accidental reuse, and avoids an
-// intentional full copy. C++ does not guarantee secure memory erasure, and
-// the moved-from caller object remains in a valid-but-unspecified state —
-// the orchestrator must not access it after the call. No secure wiping is
-// provided or claimed.
+// Ownership: the result is passed by value, so the caller must not touch it
+// after the call. No secure memory wiping is provided or claimed.
 //
-// Atomicity: phase 1 validates the entire result + classification before
-// any cell is touched; phase 2 (transformation) is total for validated
-// input. A partially masked result is unrepresentable.
+// Atomicity: phase 1 validates the whole result and classification before
+// any cell is touched, so a partially masked result is unrepresentable.
 //
-// Per column, by index (never by name — duplicate names stay safe):
+// Per column, by index (never by name, duplicate names stay safe):
 //   Pii                -> fixed transformation selected by pii_category
 //   NotClassifiedAsPii -> cell preserved exactly
 //   Unattributed       -> MaskingFailureReason::UnattributedColumn, no result
 //
 // NULL (nullopt) stays NULL and "" stays "" in every category; every OTHER
-// value in a Pii column changes — malformed values fall back to "***" and
+// value in a Pii column changes, malformed values fall back to "***" and
 // are never returned unchanged.
 //
-// Idempotence is explicitly NOT a guarantee: the pipeline invariant is that
-// the orchestrator masks exactly once. There is no detection of
-// already-masked values.
+// Not idempotent: the pipeline masks exactly once, and already-masked
+// values are not detected.
 class PiiMasker {
 public:
     MaskingOutcome mask(ports::ExecutionResult result,

@@ -5,12 +5,16 @@
 
 namespace core {
 
+using std::size_t;
+using std::string;
+using std::vector;
+
 namespace {
 
 // ASCII-only lowering, as in the policy engine: locale-independent, and
 // approximates PostgreSQL's unquoted-identifier folding, which is the
 // semantics that matter here.
-std::string ascii_lower(std::string s) {
+string ascii_lower(string s) {
     for (char& c : s) {
         if (c >= 'A' && c <= 'Z') {
             c = static_cast<char>(c - 'A' + 'a');
@@ -20,9 +24,9 @@ std::string ascii_lower(std::string s) {
 }
 
 // "customers.email" / "c.email" -> "email"
-std::string strip_qualifier(const std::string& name) {
+string strip_qualifier(const string& name) {
     const auto dot = name.rfind('.');
-    return dot == std::string::npos ? name : name.substr(dot + 1);
+    return dot == string::npos ? name : name.substr(dot + 1);
 }
 
 ColumnClassification pii(PiiCategory category) {
@@ -54,7 +58,7 @@ DataClassifier::DataClassifier()
 
 DataClassifier::DataClassifier(const ClassificationConfig& config) {
     for (const auto& mapping : config.column_mappings) {
-        const std::string key = ascii_lower(mapping.first);
+        const string key = ascii_lower(mapping.first);
         const bool inserted =
             normalized_mappings_.emplace(key, mapping.second).second;
         if (!inserted) {
@@ -69,9 +73,9 @@ DataClassifier::DataClassifier(const ClassificationConfig& config) {
 
 ClassificationResult DataClassifier::classify(
     const SqlAnalysis& analysis,
-    const std::vector<ports::ColumnInfo>& result_columns) const {
+    const vector<ports::ColumnInfo>& result_columns) const {
     ClassificationResult result;
-    // Default-constructed entries are Unattributed — the fail-closed floor.
+    // Default-constructed entries are Unattributed, the fail-closed floor.
     result.columns.assign(result_columns.size(), ColumnClassification{});
     result.fully_attributed = false;
 
@@ -124,14 +128,14 @@ ClassificationResult DataClassifier::classify(
         return result;
     }
 
-    for (std::size_t i = 0; i < result_columns.size(); ++i) {
+    for (size_t i = 0; i < result_columns.size(); ++i) {
         if (count_star_only_shape) {
             // A row count is never PII, whatever the column is named: an
             // alias such as COUNT(*) AS email must not reach the mapping.
             result.columns[i] = not_pii();
             continue;
         }
-        const std::string source =
+        const string source =
             positional_shape ? strip_qualifier(analysis.projection_columns[i])
                              : result_columns[i].name;
         const auto it = normalized_mappings_.find(ascii_lower(source));

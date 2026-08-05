@@ -2,14 +2,14 @@
 
 #include <string>
 
-#include "config/database_config.h"
+#include "config/config.h"
 #include "ports/query_executor.h"
 
 namespace postgres_adapter {
 
 // Concrete IQueryExecutor implementation over libpqxx.
 //
-// All pqxx types stay inside the .cpp — this header exposes only the port
+// All pqxx types stay inside the .cpp, this header exposes only the port
 // and config. One connection and one transaction per execute() call; no
 // shared state beyond the immutable config, so concurrent calls are safe.
 class PostgresQueryExecutor : public ports::IQueryExecutor {

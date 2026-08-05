@@ -8,7 +8,7 @@ namespace parser_adapter {
 
 // Production ISqlParser implementation wrapping hyrise/sql-parser.
 //
-// All hsql:: types stay inside the .cpp — this header exposes only the port.
+// All hsql:: types stay inside the .cpp, this header exposes only the port.
 // Stateless: one instance is reusable across calls.
 class HyriseSqlParser : public ports::ISqlParser {
 public:

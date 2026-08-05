@@ -10,7 +10,7 @@
 // Error-sanitization rule: PostgreSQL error messages
 // routinely echo data values (e.g. unique-violation messages), and libpq
 // connection errors can echo connection details. ExecutionResult::error is
-// therefore built ONLY from fixed literals plus a SQLSTATE code — never from
+// therefore built ONLY from fixed literals plus a SQLSTATE code, never from
 // driver message text, SQL fragments, or the connection string.
 
 namespace postgres_adapter {

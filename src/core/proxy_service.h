@@ -15,22 +15,18 @@
 
 namespace core {
 
-// The central orchestrator: a fixed, synchronous pipeline —
+// The central orchestrator. A fixed, synchronous pipeline:
 // analyze -> policy -> execute -> classify -> mask -> build AuditRecord ->
 // append audit exactly once -> return a typed ServiceResult.
 //
-// CONCURRENCY: handle() serializes the ENTIRE pipeline behind one
-// mutex, so the service processes exactly one request at a time. This is
-// deliberate, not an oversight: the query executor opens one connection per
-// call with no pool, and cpp-httplib may dispatch handlers concurrently.
-// Throughput is explicitly out of scope for this submission; a connection
-// pool behind IQueryExecutor is the documented future step.
+// Concurrency: handle() serializes the whole pipeline behind one mutex, so
+// exactly one request is processed at a time. The executor opens a
+// connection per call with no pool, and cpp-httplib may dispatch handlers
+// concurrently.
 //
-// Dependencies are references — the caller owns lifetimes. SqlAnalyzer is
-// injected because it owns the parser (that is how a fake parser reaches the
-// pipeline in tests). PolicyEngine, DataClassifier and PiiMasker are
-// stateless concretes owned by value: nothing to substitute, three fewer
-// constructor parameters.
+// Dependencies are references; the caller owns lifetimes. SqlAnalyzer is
+// injected because it owns the parser. PolicyEngine, DataClassifier and
+// PiiMasker are stateless and owned by value.
 class ProxyService {
 public:
     ProxyService(SqlAnalyzer& analyzer, ports::IQueryExecutor& executor,
@@ -44,7 +40,7 @@ public:
 private:
     // Defined in the .cpp. Both members are non-default-constructible, so
     // every return path out of process() must produce BOTH a client result
-    // and the audit record describing it — a path that forgets the record
+    // and the audit record describing it, a path that forgets the record
     // does not compile.
     struct Processing;
 

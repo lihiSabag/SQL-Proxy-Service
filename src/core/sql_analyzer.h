@@ -10,7 +10,7 @@ namespace core {
 
 class SqlAnalyzer {
 public:
-    // Throws std::invalid_argument if parser is null — fails at construction
+    // Throws std::invalid_argument if parser is null, fails at construction
     // rather than deferring to a null dereference during analyze().
     explicit SqlAnalyzer(std::unique_ptr<ports::ISqlParser> parser);
 

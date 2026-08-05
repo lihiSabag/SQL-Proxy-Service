@@ -4,7 +4,7 @@
 
 namespace ports {
 
-// Closed result vocabulary. A repository failure is a bare enum — it can
+// Closed result vocabulary. A repository failure is a bare enum, it can
 // never carry paths, record contents, OS text, errno strings, or exception
 // messages (the same sanitization-by-type rule as every other port).
 enum class AuditAppendResult {
@@ -25,7 +25,7 @@ inline const char* to_string(AuditAppendResult result) {
     return "WRITE_FAILURE";
 }
 
-// Persists audit records. Implementations must not throw — every failure
+// Persists audit records. Implementations must not throw, every failure
 // is reported through AuditAppendResult (house rule: failures cross ports
 // as values). Ok is returned only after the record has been written and
 // flushed to the OS stream; this is NOT an fsync-level durability claim.

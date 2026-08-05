@@ -37,10 +37,10 @@
 #include <unistd.h>
 
 #include "audit/jsonl_audit_repository.h"
-#include "http/query_routes.h"
+#include "http/routes.h"
 #include "parser/hyrise_sql_parser.h"
 #include "postgres/postgres_query_executor.h"
-#include "config/database_config.h"
+#include "config/config.h"
 #include "core/proxy_service.h"
 #include "core/sql_analyzer.h"
 #include "logging/system_log.h"

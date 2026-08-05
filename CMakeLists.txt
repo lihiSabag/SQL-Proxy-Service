@@ -45,11 +45,9 @@ enable_testing()
 
 add_executable(sql_proxy_service
     src/main.cpp
-    src/config/server_config.cpp
-    src/config/database_config.cpp
+    src/config/config.cpp
     src/core/sql_analysis.cpp
     src/core/sql_analyzer.cpp
-    src/core/policy_decision.cpp
     src/core/policy_engine.cpp
     src/core/data_classification.cpp
     src/core/data_classifier.cpp
@@ -59,8 +57,7 @@ add_executable(sql_proxy_service
     src/core/proxy_service.cpp
     src/logging/system_log.cpp
     src/http/http_server.cpp
-    src/http/health_routes.cpp
-    src/http/query_routes.cpp
+    src/http/routes.cpp
     src/parser/hyrise_sql_parser.cpp
     src/postgres/postgres_query_executor.cpp
     src/audit/jsonl_audit_repository.cpp
@@ -81,8 +78,7 @@ target_link_libraries(sql_proxy_service
 )
 
 add_executable(sql_proxy_unit_tests
-    tests/core/server_config_test.cpp
-    tests/core/database_config_test.cpp
+    tests/core/config_test.cpp
     tests/core/sql_analyzer_test.cpp
     tests/core/sql_parser_contract_test.cpp
     tests/core/policy_engine_test.cpp
@@ -91,11 +87,9 @@ add_executable(sql_proxy_unit_tests
     tests/core/audit_record_test.cpp
     tests/core/jsonl_audit_repository_test.cpp
     tests/core/proxy_service_test.cpp
-    src/config/server_config.cpp
-    src/config/database_config.cpp
+    src/config/config.cpp
     src/core/sql_analysis.cpp
     src/core/sql_analyzer.cpp
-    src/core/policy_decision.cpp
     src/core/policy_engine.cpp
     src/core/data_classification.cpp
     src/core/data_classifier.cpp
@@ -133,7 +127,6 @@ add_executable(sql_proxy_http_tests
     tests/integration/http_query_test.cpp
     src/core/sql_analysis.cpp
     src/core/sql_analyzer.cpp
-    src/core/policy_decision.cpp
     src/core/policy_engine.cpp
     src/core/data_classification.cpp
     src/core/data_classifier.cpp
@@ -143,8 +136,7 @@ add_executable(sql_proxy_http_tests
     src/core/proxy_service.cpp
     src/logging/system_log.cpp
     src/http/http_server.cpp
-    src/http/health_routes.cpp
-    src/http/query_routes.cpp
+    src/http/routes.cpp
 )
 
 target_include_directories(sql_proxy_http_tests
@@ -170,10 +162,8 @@ set_tests_properties(sql_proxy_http_tests PROPERTIES LABELS "integration;http")
 add_executable(sql_proxy_integration_tests
     tests/integration/postgres_query_executor_test.cpp
     tests/integration/end_to_end_test.cpp
-    src/config/database_config.cpp
     src/core/sql_analysis.cpp
     src/core/sql_analyzer.cpp
-    src/core/policy_decision.cpp
     src/core/policy_engine.cpp
     src/core/data_classification.cpp
     src/core/data_classifier.cpp
@@ -185,7 +175,7 @@ add_executable(sql_proxy_integration_tests
     src/parser/hyrise_sql_parser.cpp
     src/postgres/postgres_query_executor.cpp
     src/audit/jsonl_audit_repository.cpp
-    src/http/query_routes.cpp
+    src/http/routes.cpp
 )
 
 target_include_directories(sql_proxy_integration_tests

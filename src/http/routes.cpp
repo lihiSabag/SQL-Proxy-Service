@@ -1,4 +1,4 @@
-#include "http/query_routes.h"
+#include "http/routes.h"
 
 #include <cstddef>
 #include <string>
@@ -21,7 +21,7 @@ struct FailureResponse {
     const char* message;
 };
 
-// Fixed, generic messages only — never SQL, driver text, values, or names.
+// Fixed, generic messages only, never SQL, driver text, values, or names.
 // Every policy denial except empty input maps to the same 403 response, so
 // rejection reasons cannot be probed from outside.
 FailureResponse response_for(core::ServiceFailure failure) {
@@ -138,6 +138,14 @@ void register_query_routes(httplib::Server& server, core::ProxyService& proxy) {
                 [&proxy](const httplib::Request& request, httplib::Response& response) {
                     handle_query_request(proxy, request, response);
                 });
+}
+
+void register_health_routes(httplib::Server& server) {
+    server.Get("/health", [](const httplib::Request&, httplib::Response& response) {
+        const nlohmann::json body{{"status", "ok"}};
+        response.set_content(body.dump(), "application/json");
+        response.status = 200;
+    });
 }
 
 }  // namespace http_adapter

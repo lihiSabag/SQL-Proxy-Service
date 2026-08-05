@@ -20,7 +20,7 @@
 #include <nlohmann/json.hpp>
 
 #include "http/http_server.h"
-#include "http/query_routes.h"
+#include "http/routes.h"
 #include "core/proxy_service.h"
 #include "logging/system_log.h"
 #include "fake_audit_repository.h"

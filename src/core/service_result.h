@@ -24,13 +24,11 @@ struct WriteResult {
     std::size_t affected_rows = 0;
 };
 
-// Coarse, client-safe failure vocabulary. Deliberately NOT RejectReason or
-// AuditOutcome: the audit trail records the precise reason, while the client
-// sees only a category — every policy denial except empty input is
-// externally indistinguishable, so SYSTEM_TABLE_ACCESS and
-// UNATTRIBUTABLE_PROJECTION cannot be probed for.
+// Coarse, client-safe failure vocabulary, kept separate from RejectReason:
+// the audit trail records the precise reason while the client sees only a
+// category, so the rule set cannot be mapped by probing.
 enum class ServiceFailure {
-    EmptyInput,           // empty SQL — audited as PolicyRejected/EMPTY_INPUT
+    EmptyInput,           // empty SQL, audited as PolicyRejected/EMPTY_INPUT
     UnparseableSql,
     PolicyRejected,       // every other typed rejection, generically
     DatabaseUnavailable,
@@ -42,9 +40,8 @@ enum class ServiceFailure {
 const char* to_string(ServiceFailure failure);
 
 // Success-or-failure by type: a failure cannot carry a result, so no caller
-// can reach data through a failed request. Not default-constructible — a
-// default variant would hold an empty MaskedQueryResult and masquerade as a
-// success ProxyService never produced (the MaskingOutcome lesson).
+// can reach data through a failed request. Not default-constructible: a
+// default would masquerade as a success the service never produced.
 class ServiceResult {
 public:
     ServiceResult() = delete;

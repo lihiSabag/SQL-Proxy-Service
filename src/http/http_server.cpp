@@ -1,7 +1,6 @@
 #include "http/http_server.h"
 
-#include "http/health_routes.h"
-#include "http/query_routes.h"
+#include "http/routes.h"
 #include "logging/system_log.h"
 
 namespace http_adapter {

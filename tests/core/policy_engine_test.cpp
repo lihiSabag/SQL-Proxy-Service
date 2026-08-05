@@ -9,7 +9,6 @@
 
 #include <gtest/gtest.h>
 
-#include "core/policy_decision.h"
 #include "core/policy_engine.h"
 #include "core/sql_analysis.h"
 #include "core/sql_analyzer.h"

@@ -11,7 +11,7 @@ namespace ports {
 // unchanged by SqlAnalyzer. Spelling is preserved permanently: the accepted
 // parser does not report whether an identifier was quoted and never
 // case-folds, so PostgreSQL-accurate quoted-versus-unquoted normalization is
-// not possible with it — a documented limitation, not deferred work.
+// not possible with it. This is a limitation, not deferred work.
 struct TableRef {
     std::string schema;  // empty when the reference is unqualified
     std::string name;
@@ -21,7 +21,7 @@ struct TableRef {
 //
 // Projection contract: projection_columns contains plain column identifiers
 // only. Computed expressions (function calls, arithmetic, CASE, ...) must not
-// appear in it — they set has_computed_projection. A mixed projection
+// appear in it; they set has_computed_projection. A mixed projection
 // (e.g. SELECT id, UPPER(email)) yields both list entries and the flag.
 //
 // Exactly ONE computed shape is reported separately instead of as a generic

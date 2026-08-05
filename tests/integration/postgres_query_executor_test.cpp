@@ -28,7 +28,7 @@
 #include <pqxx/pqxx>
 
 #include "postgres/postgres_query_executor.h"
-#include "config/database_config.h"
+#include "config/config.h"
 #include "ports/query_executor.h"
 
 namespace {

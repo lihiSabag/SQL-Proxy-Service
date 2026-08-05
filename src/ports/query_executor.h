@@ -17,7 +17,7 @@ enum class ColumnType {
     Boolean,
     Timestamp,
     Date,
-    Other,  // anything unmapped — fail-closed, never a guess
+    Other,  // anything unmapped, fail-closed, never a guess
 };
 
 struct ColumnInfo {
@@ -33,13 +33,13 @@ enum class ExecutionStatus {
 
 // Result semantics:
 // - has_result_set: the database returned at least one column. True for
-//   SELECT and for DML with RETURNING — it makes no claim about statement type.
+//   SELECT and for DML with RETURNING, it makes no claim about statement type.
 // - row_count: rows RETURNED in the result set (0 when there is none).
 // - affected_rows: rows AFFECTED as reported by the database where it reports
 //   them (DML, including RETURNING forms); 0 where nothing is reported
 //   (plain SELECT, DDL).
 // - Cells: std::nullopt is SQL NULL; "" is an empty string. Never conflated.
-// - error: sanitized — fixed text plus at most a 5-char SQLSTATE code. Never
+// - error: sanitized, fixed text plus at most a 5-char SQLSTATE code. Never
 //   driver message text, SQL fragments, data values, or connection details.
 struct ExecutionResult {
     ExecutionStatus status = ExecutionStatus::ExecutionFailure;  // fail-closed
@@ -56,7 +56,7 @@ struct ExecutionResult {
 // SqlAnalyzer and PolicyEngine confirm this). Passing multiple statements
 // violates the precondition; behavior in that case is unsupported and must
 // not be relied upon. The executor never parses, splits, counts, or polices
-// SQL — that responsibility lives upstream, and no promise is made about
+// SQL, that responsibility lives upstream, and no promise is made about
 // what a precondition-violating call produces.
 //
 // Implementations must not let driver exceptions escape execute(); every
@@ -64,7 +64,7 @@ struct ExecutionResult {
 class IQueryExecutor {
 public:
     virtual ~IQueryExecutor() = default;
-    // Executes the exact analyzed SQL text — never a reconstructed query.
+    // Executes the exact analyzed SQL text, never a reconstructed query.
     virtual ExecutionResult execute(const std::string& sql) = 0;
 };
 

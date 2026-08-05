@@ -12,7 +12,7 @@
 namespace core {
 
 // Source-column-name -> category mappings. Names are matched
-// case-insensitively (ASCII). Table-qualified keys are not supported —
+// case-insensitively (ASCII). Table-qualified keys are not supported,
 // qualifiers on projection entries are stripped before lookup, because in a
 // join the qualifier is a table *alias* the analyzer cannot resolve back to
 // a real table (a documented analysis limitation). Column-name-only mappings
@@ -27,24 +27,24 @@ ClassificationConfig default_classification_config();
 
 // Concrete class: metadata- and mapping-based PII classification.
 // Consumes ONLY the SQL analysis and result-set column
-// metadata — never result rows or cell values, so no PII can enter (or leak
+// metadata, never result rows or cell values, so no PII can enter (or leak
 // from) this class.
 //
 // Two attribution modes:
-//   1. Positional — plain/aliased explicit projections: result column i
+//   1. Positional, plain/aliased explicit projections: result column i
 //      attributes to projection_columns[i] (qualifier stripped).
-//   2. Pure wildcard — SELECT * only: result-column names ARE the true
+//   2. Pure wildcard, SELECT * only: result-column names ARE the true
 //      source names as returned by the database.
 // Every other shape (computed projections, mixed star+explicit, count
 // mismatches, non-SELECT analyses) yields Unattributed columns with
-// fully_attributed == false — never a silent NotClassifiedAsPii.
+// fully_attributed == false, never a silent NotClassifiedAsPii.
 class DataClassifier {
 public:
     DataClassifier();  // uses default_classification_config()
 
     // Throws std::invalid_argument if two mappings collide after
     // case-insensitive normalization: a colliding config is a programming
-    // error, refused at construction (SqlAnalyzer precedent) — never
+    // error, refused at construction (SqlAnalyzer precedent), never
     // resolved silently in favor of either entry.
     explicit DataClassifier(const ClassificationConfig& config);
 

@@ -96,7 +96,7 @@ JsonlAuditRepository::JsonlAuditRepository(const std::string& file_path) {
 ports::AuditAppendResult JsonlAuditRepository::append(
     const core::AuditRecord& record) {
     try {
-        // Serialization is a pure function of the record — done outside the
+        // Serialization is a pure function of the record, done outside the
         // lock so the critical section is exactly: write + flush + check.
         const std::string line = serialize(record).dump();
 

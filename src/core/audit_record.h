@@ -6,7 +6,7 @@
 #include <variant>
 #include <vector>
 
-#include "core/policy_decision.h"
+#include "core/policy_engine.h"
 #include "core/sql_analysis.h"
 
 namespace core {
@@ -95,23 +95,20 @@ struct DatabaseFailureDetails {
     StatementType statement_type;  // must be Select under the read-only policy
 };
 
-struct MaskingRefusedDetails {     // NO PiiSummary — see PiiSummary comment
+struct MaskingRefusedDetails {     // NO PiiSummary, see PiiSummary comment
     StatementType statement_type;  // must be Select under the read-only policy
     std::size_t column_count = 0;
 };
 
-// No open text, ever — an internal failure audits as the fact alone.
+// No open text: an internal failure audits as the fact alone.
 struct InternalFailureDetails {};
 
-// One audit record per controlled request outcome. Envelope + one
-// outcome-specific details alternative; the outcome is DERIVED from the
-// active alternative and never stored separately, so record and outcome
-// cannot contradict each other.
+// One audit record per controlled request outcome. The outcome is derived
+// from the active details alternative and never stored separately, so a
+// record cannot contradict its own outcome.
 //
-// Not default-constructible (MaskingOutcome lesson); created only through
-// the per-outcome factories below. Factories reject semantically invalid
-// values inside an outcome with std::invalid_argument (programmer-contract
-// misuse):
+// Not default-constructible; created only through the per-outcome factories
+// below. Factories reject invalid combinations with std::invalid_argument:
 //   - policy_rejected(): reason must not be None or UnparseableSql;
 //   - success()/masking_refused(): statement_type must be Select, since
 //     both describe a masked result set;
@@ -120,10 +117,9 @@ struct InternalFailureDetails {};
 //   - database_failure(): statement_type must be Select or Insert, because
 //     execution can fail on either path.
 //
-// timestamp_ms is UTC epoch milliseconds, supplied by the caller — there is
-// no clock port, and the repository never decides event time. request_id is
-// a process-local caller-supplied identifier; it may repeat across process
-// restarts and carries no uniqueness or identity claim.
+// timestamp_ms is UTC epoch milliseconds supplied by the caller; the
+// repository never decides event time. request_id is process-local and may
+// repeat across restarts, so it carries no identity claim.
 class AuditRecord {
 public:
     AuditRecord() = delete;
@@ -166,8 +162,8 @@ public:
     std::uint64_t request_id() const { return request_id_; }
     const AuditTableMetadata& referenced_tables() const { return referenced_tables_; }
 
-    // Wrong-state access throws std::bad_variant_access — a detail can
-    // never be silently read from a record of a different outcome.
+    // Wrong-state access throws std::bad_variant_access, so a detail can never
+    // be read from a record of a different outcome.
     const SuccessDetails& success_details() const;
     const WriteSuccessDetails& write_success_details() const;
     const PolicyRejectedDetails& policy_rejected_details() const;

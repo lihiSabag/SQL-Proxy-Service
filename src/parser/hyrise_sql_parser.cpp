@@ -9,7 +9,7 @@
 
 // Translation notes:
 // - The SQLParserResult is a stack local: it owns every AST node and char*.
-//   Everything is deep-copied into std::string during the walk, so nothing
+//   Everything is deep-copied into string during the walk, so nothing
 //   parser-owned can outlive parse().
 // - errorMsg() is discarded entirely; the error string is built only from
 //   fixed text plus numeric position, never from input-derived content.
@@ -17,16 +17,19 @@
 
 namespace parser_adapter {
 
+using std::string;
+using std::vector;
+
 namespace {
 
-std::string copy_or_empty(const char* s) {
-    return s == nullptr ? std::string() : std::string(s);
+string copy_or_empty(const char* s) {
+    return s == nullptr ? string() : string(s);
 }
 
 // ASCII-only lowering, as in the core: locale-independent and well-defined on
 // negative char. Needed because the parser preserves function-name spelling
 // exactly as written ("count", "COUNT", "CoUnT" all reach us verbatim).
-std::string ascii_lower(std::string s) {
+string ascii_lower(string s) {
     for (char& c : s) {
         if (c >= 'A' && c <= 'Z') {
             c = static_cast<char>(c - 'A' + 'a');
@@ -71,7 +74,7 @@ bool is_count_star(const hsql::Expr& e) {
     return argument != nullptr && argument->type == hsql::kExprStar;
 }
 
-// Fixed note strings only — never derived from user input.
+// Fixed note strings only, never derived from user input.
 constexpr const char* kNoteInsertWithoutColumns = "INSERT without column list";
 constexpr const char* kNoteFromSubquery = "subquery in FROM";
 constexpr const char* kNoteWithCte = "WITH/CTE";
@@ -113,7 +116,7 @@ void collect_tables(const hsql::TableRef* ref, ports::ParsedStatement& out) {
 // flag; a canonical COUNT(*) sets the safe-count flag; anything else sets the
 // computed flag. Exactly one arm fires per entry, so a mixed projection
 // reports every shape it contains and the core can refuse the combination.
-void classify_projection(const std::vector<hsql::Expr*>* select_list,
+void classify_projection(const vector<hsql::Expr*>* select_list,
                          ports::ParsedStatement& out) {
     if (select_list == nullptr) {
         return;
@@ -125,9 +128,9 @@ void classify_projection(const std::vector<hsql::Expr*>* select_list,
         if (e->type == hsql::kExprStar) {
             out.has_wildcard_projection = true;
         } else if (e->type == hsql::kExprColumnRef) {
-            std::string column;
+            string column;
             if (e->table != nullptr) {
-                column = std::string(e->table) + ".";
+                column = string(e->table) + ".";
             }
             column += copy_or_empty(e->name);
             out.projection_columns.push_back(std::move(column));
@@ -268,7 +271,7 @@ ports::ParsedStatement translate_statement(const hsql::SQLStatement& stmt) {
             translate_alter(static_cast<const hsql::AlterStatement&>(stmt), out);
             break;
         default:
-            // SHOW, transactions, prepare/execute, import/export, ... —
+            // SHOW, transactions, prepare/execute, import/export and so on:
             // parseable but out of scope; policy rejects Unknown downstream.
             out.type = core::StatementType::Unknown;
             break;
@@ -276,8 +279,8 @@ ports::ParsedStatement translate_statement(const hsql::SQLStatement& stmt) {
     return out;
 }
 
-std::string sanitized_error(const hsql::SQLParserResult& result) {
-    std::string error = "syntax error";
+string sanitized_error(const hsql::SQLParserResult& result) {
+    string error = "syntax error";
     if (result.errorLine() >= 0) {
         error += " at line " + std::to_string(result.errorLine() + 1) +
                  ", column " + std::to_string(result.errorColumn() + 1);
@@ -287,7 +290,7 @@ std::string sanitized_error(const hsql::SQLParserResult& result) {
 
 }  // namespace
 
-ports::ParseResult HyriseSqlParser::parse(const std::string& sql) {
+ports::ParseResult HyriseSqlParser::parse(const string& sql) {
     ports::ParseResult out;
     try {
         hsql::SQLParserResult result;  // owns the whole AST; freed on return

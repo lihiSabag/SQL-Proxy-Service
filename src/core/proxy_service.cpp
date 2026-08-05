@@ -9,6 +9,9 @@
 
 namespace core {
 
+using std::size_t;
+using std::string;
+
 struct ProxyService::Processing {
     ServiceResult result;
     AuditRecord record;
@@ -22,15 +25,13 @@ std::int64_t now_epoch_ms() {
         .count();
 }
 
-// Signed upstream counts must be validated before conversion to the audit
-// model's std::size_t fields. A negative value is a broken upstream
-// contract, not a client error: it throws and is caught by the single
-// catch in handle(), becoming a controlled InternalFailure.
-std::size_t checked_count(long long value, const char* what) {
+// A negative count is a broken upstream contract, not a client error: it
+// throws and becomes a controlled InternalFailure via the catch in handle().
+size_t checked_count(long long value, const char* what) {
     if (value < 0) {
-        throw std::invalid_argument(std::string(what) + " must not be negative");
+        throw std::invalid_argument(string(what) + " must not be negative");
     }
-    return static_cast<std::size_t>(value);
+    return static_cast<size_t>(value);
 }
 
 PiiSummary summarize(const ClassificationResult& classification) {
@@ -65,11 +66,9 @@ MaskedQueryResult to_masked_result(const ports::ExecutionResult& masked) {
     return out;
 }
 
-// Empty input is the one denial the client may distinguish (it is a
-// malformed request, not a security decision). Every other reason —
-// including SYSTEM_TABLE_ACCESS and UNATTRIBUTABLE_PROJECTION — collapses to
-// the same generic rejection. `default` is deliberate here: a reason added
-// later must stay generic externally unless someone decides otherwise.
+// Empty input is the one denial the client may distinguish; it is a
+// malformed request, not a security decision. Every other reason collapses
+// to the same generic rejection, and a reason added later stays generic.
 ServiceFailure client_failure_for(RejectReason reason) {
     switch (reason) {
         case RejectReason::EmptyInput:
@@ -85,7 +84,7 @@ ProxyService::ProxyService(SqlAnalyzer& analyzer, ports::IQueryExecutor& executo
                            ports::IAuditRepository& audit)
     : analyzer_(analyzer), executor_(executor), audit_(audit) {}
 
-ProxyService::Processing ProxyService::process(const std::string& sql,
+ProxyService::Processing ProxyService::process(const string& sql,
                                                std::int64_t timestamp_ms,
                                                std::uint64_t request_id) {
     const SqlAnalysis analysis = analyzer_.analyze(sql);
@@ -95,7 +94,7 @@ ProxyService::Processing ProxyService::process(const std::string& sql,
         // A parser failure has exactly ONE audit representation:
         // AuditOutcome::ParsingFailure (the AuditRecord factory forbids
         // PolicyRejected + UNPARSEABLE_SQL). PolicyEngine remains the single
-        // decision point — this is only the audit-side translation.
+        // decision point, this is only the audit-side translation.
         if (decision.reason == RejectReason::UnparseableSql) {
             return Processing{
                 ServiceResult::failure(ServiceFailure::UnparseableSql),
@@ -131,7 +130,7 @@ ProxyService::Processing ProxyService::process(const std::string& sql,
     // result. Policy admits exactly one write shape, so StatementType is
     // enough to identify it here.
     if (analysis.statement_type == StatementType::Insert) {
-        const std::size_t affected =
+        const size_t affected =
             checked_count(execution.affected_rows, "affected_rows");
         if (affected != 1) {
             // The one authorized shape inserts exactly one row. Any other
@@ -150,8 +149,8 @@ ProxyService::Processing ProxyService::process(const std::string& sql,
 
     // Captured BEFORE the executor result is moved into the masker; the
     // moved-from object is never read again.
-    const std::size_t row_count = checked_count(execution.row_count, "row_count");
-    const std::size_t column_count = execution.columns.size();
+    const size_t row_count = checked_count(execution.row_count, "row_count");
+    const size_t column_count = execution.columns.size();
 
     const ClassificationResult classification =
         classifier_.classify(analysis, execution.columns);
@@ -168,8 +167,8 @@ ProxyService::Processing ProxyService::process(const std::string& sql,
                                              {analysis.statement_type, column_count},
                                              analysis.tables)};
         }
-        // StructuralMismatch / InvalidClassification are upstream contract
-        // violations — programmer bugs, audited as internal failures.
+        // StructuralMismatch and InvalidClassification are upstream contract
+        // violations, audited as internal failures.
         return Processing{ServiceResult::failure(ServiceFailure::InternalError),
                           AuditRecord::internal_failure(timestamp_ms, request_id)};
     }
@@ -192,8 +191,8 @@ ports::AuditAppendResult ProxyService::append_safely(const AuditRecord& record) 
     }
 }
 
-ServiceResult ProxyService::handle(const std::string& sql) {
-    // Serializes the whole pipeline — see the concurrency note in the header.
+ServiceResult ProxyService::handle(const string& sql) {
+    // Serializes the whole pipeline; see the concurrency note in the header.
     std::lock_guard<std::mutex> lock(mutex_);
 
     const std::int64_t timestamp_ms = now_epoch_ms();
@@ -216,8 +215,8 @@ ServiceResult ProxyService::handle(const std::string& sql) {
 
     if (appended != ports::AuditAppendResult::Ok) {
         // Generic only: no SQL, values, column names, paths, or exception
-        // text. The audit failure is never itself audited — there is no
-        // second append call site to reach.
+        // text. The audit failure is never itself audited: there is no second
+        // append call site to reach.
         if (auto log = system_log::logger()) {
             log->error("audit persistence failed ({})", ports::to_string(appended));
         }
