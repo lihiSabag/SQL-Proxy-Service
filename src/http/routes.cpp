@@ -5,7 +5,6 @@
 
 #include <nlohmann/json.hpp>
 
-#include "core/service_result.h"
 
 namespace http_adapter {
 

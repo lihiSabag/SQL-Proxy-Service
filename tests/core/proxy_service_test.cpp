@@ -14,7 +14,6 @@
 #include <gtest/gtest.h>
 
 #include "core/proxy_service.h"
-#include "core/service_result.h"
 #include "fake_audit_repository.h"
 #include "fake_query_executor.h"
 #include "fake_sql_parser.h"

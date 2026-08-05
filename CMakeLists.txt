@@ -49,11 +49,9 @@ add_executable(sql_proxy_service
     src/core/sql_analysis.cpp
     src/core/sql_analyzer.cpp
     src/core/policy_engine.cpp
-    src/core/data_classification.cpp
     src/core/data_classifier.cpp
     src/core/pii_masker.cpp
     src/core/audit_record.cpp
-    src/core/service_result.cpp
     src/core/proxy_service.cpp
     src/logging/system_log.cpp
     src/http/http_server.cpp
@@ -91,11 +89,9 @@ add_executable(sql_proxy_unit_tests
     src/core/sql_analysis.cpp
     src/core/sql_analyzer.cpp
     src/core/policy_engine.cpp
-    src/core/data_classification.cpp
     src/core/data_classifier.cpp
     src/core/pii_masker.cpp
     src/core/audit_record.cpp
-    src/core/service_result.cpp
     src/core/proxy_service.cpp
     src/logging/system_log.cpp
     src/parser/hyrise_sql_parser.cpp
@@ -128,11 +124,9 @@ add_executable(sql_proxy_http_tests
     src/core/sql_analysis.cpp
     src/core/sql_analyzer.cpp
     src/core/policy_engine.cpp
-    src/core/data_classification.cpp
     src/core/data_classifier.cpp
     src/core/pii_masker.cpp
     src/core/audit_record.cpp
-    src/core/service_result.cpp
     src/core/proxy_service.cpp
     src/logging/system_log.cpp
     src/http/http_server.cpp
@@ -165,11 +159,9 @@ add_executable(sql_proxy_integration_tests
     src/core/sql_analysis.cpp
     src/core/sql_analyzer.cpp
     src/core/policy_engine.cpp
-    src/core/data_classification.cpp
     src/core/data_classifier.cpp
     src/core/pii_masker.cpp
     src/core/audit_record.cpp
-    src/core/service_result.cpp
     src/core/proxy_service.cpp
     src/logging/system_log.cpp
     src/parser/hyrise_sql_parser.cpp

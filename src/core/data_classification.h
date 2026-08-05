@@ -14,7 +14,17 @@ enum class PiiCategory {
     CreditCard,
 };
 
-const char* to_string(PiiCategory category);
+inline const char* to_string(PiiCategory category) {
+    switch (category) {
+        case PiiCategory::Email:
+            return "PII.Email";
+        case PiiCategory::Phone:
+            return "PII.Phone";
+        case PiiCategory::CreditCard:
+            return "PII.CreditCard";
+    }
+    return "PII.Unknown";
+}
 
 // Three states, not two: NotClassifiedAsPii means "examined and
 // not sensitive"; Unattributed means "could not determine what this column
