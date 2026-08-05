@@ -7,10 +7,10 @@
 #include <memory>
 #include <string>
 
-#include "adapters/audit/jsonl_audit_repository.h"
-#include "adapters/http/http_server.h"
-#include "adapters/parser/hyrise_sql_parser.h"
-#include "adapters/postgres/postgres_query_executor.h"
+#include "audit/jsonl_audit_repository.h"
+#include "http/http_server.h"
+#include "parser/hyrise_sql_parser.h"
+#include "postgres/postgres_query_executor.h"
 #include "config/database_config.h"
 #include "config/server_config.h"
 #include "core/proxy_service.h"

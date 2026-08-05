@@ -36,10 +36,10 @@
 #include <pqxx/pqxx>
 #include <unistd.h>
 
-#include "adapters/audit/jsonl_audit_repository.h"
-#include "adapters/http/query_routes.h"
-#include "adapters/parser/hyrise_sql_parser.h"
-#include "adapters/postgres/postgres_query_executor.h"
+#include "audit/jsonl_audit_repository.h"
+#include "http/query_routes.h"
+#include "parser/hyrise_sql_parser.h"
+#include "postgres/postgres_query_executor.h"
 #include "config/database_config.h"
 #include "core/proxy_service.h"
 #include "core/sql_analyzer.h"

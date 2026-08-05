@@ -1,4 +1,4 @@
-#include "adapters/http/query_routes.h"
+#include "http/query_routes.h"
 
 #include <cstddef>
 #include <string>

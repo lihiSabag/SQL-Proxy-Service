@@ -1,4 +1,4 @@
-#include "adapters/postgres/postgres_query_executor.h"
+#include "postgres/postgres_query_executor.h"
 
 #include <optional>
 #include <string>

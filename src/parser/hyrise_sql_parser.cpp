@@ -1,4 +1,4 @@
-#include "adapters/parser/hyrise_sql_parser.h"
+#include "parser/hyrise_sql_parser.h"
 
 #include <string>
 #include <vector>

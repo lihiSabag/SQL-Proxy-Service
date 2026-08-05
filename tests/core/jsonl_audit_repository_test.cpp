@@ -13,7 +13,7 @@
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
-#include "adapters/audit/jsonl_audit_repository.h"
+#include "audit/jsonl_audit_repository.h"
 #include "core/audit_record.h"
 #include "fake_audit_repository.h"
 #include "ports/audit_repository.h"

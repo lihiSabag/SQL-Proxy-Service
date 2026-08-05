@@ -1,4 +1,4 @@
-#include "adapters/http/health_routes.h"
+#include "http/health_routes.h"
 
 #include <nlohmann/json.hpp>
 

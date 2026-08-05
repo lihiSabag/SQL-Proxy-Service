@@ -1,4 +1,4 @@
-#include "adapters/audit/jsonl_audit_repository.h"
+#include "audit/jsonl_audit_repository.h"
 
 #include <cstdio>
 #include <ctime>

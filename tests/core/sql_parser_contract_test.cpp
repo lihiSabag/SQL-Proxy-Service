@@ -10,7 +10,7 @@
 #include <memory>
 #include <string>
 
-#include "adapters/parser/hyrise_sql_parser.h"
+#include "parser/hyrise_sql_parser.h"
 #include "core/sql_analyzer.h"
 #include "ports/sql_parser.h"
 

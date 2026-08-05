@@ -19,8 +19,8 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
-#include "adapters/http/http_server.h"
-#include "adapters/http/query_routes.h"
+#include "http/http_server.h"
+#include "http/query_routes.h"
 #include "core/proxy_service.h"
 #include "logging/system_log.h"
 #include "fake_audit_repository.h"

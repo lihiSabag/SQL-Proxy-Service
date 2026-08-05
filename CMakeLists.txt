@@ -58,12 +58,12 @@ add_executable(sql_proxy_service
     src/core/service_result.cpp
     src/core/proxy_service.cpp
     src/logging/system_log.cpp
-    src/adapters/http/http_server.cpp
-    src/adapters/http/health_routes.cpp
-    src/adapters/http/query_routes.cpp
-    src/adapters/parser/hyrise_sql_parser.cpp
-    src/adapters/postgres/postgres_query_executor.cpp
-    src/adapters/audit/jsonl_audit_repository.cpp
+    src/http/http_server.cpp
+    src/http/health_routes.cpp
+    src/http/query_routes.cpp
+    src/parser/hyrise_sql_parser.cpp
+    src/postgres/postgres_query_executor.cpp
+    src/audit/jsonl_audit_repository.cpp
 )
 
 target_include_directories(sql_proxy_service
@@ -104,8 +104,8 @@ add_executable(sql_proxy_unit_tests
     src/core/service_result.cpp
     src/core/proxy_service.cpp
     src/logging/system_log.cpp
-    src/adapters/parser/hyrise_sql_parser.cpp
-    src/adapters/audit/jsonl_audit_repository.cpp
+    src/parser/hyrise_sql_parser.cpp
+    src/audit/jsonl_audit_repository.cpp
 )
 
 target_include_directories(sql_proxy_unit_tests
@@ -142,9 +142,9 @@ add_executable(sql_proxy_http_tests
     src/core/service_result.cpp
     src/core/proxy_service.cpp
     src/logging/system_log.cpp
-    src/adapters/http/http_server.cpp
-    src/adapters/http/health_routes.cpp
-    src/adapters/http/query_routes.cpp
+    src/http/http_server.cpp
+    src/http/health_routes.cpp
+    src/http/query_routes.cpp
 )
 
 target_include_directories(sql_proxy_http_tests
@@ -182,10 +182,10 @@ add_executable(sql_proxy_integration_tests
     src/core/service_result.cpp
     src/core/proxy_service.cpp
     src/logging/system_log.cpp
-    src/adapters/parser/hyrise_sql_parser.cpp
-    src/adapters/postgres/postgres_query_executor.cpp
-    src/adapters/audit/jsonl_audit_repository.cpp
-    src/adapters/http/query_routes.cpp
+    src/parser/hyrise_sql_parser.cpp
+    src/postgres/postgres_query_executor.cpp
+    src/audit/jsonl_audit_repository.cpp
+    src/http/query_routes.cpp
 )
 
 target_include_directories(sql_proxy_integration_tests
