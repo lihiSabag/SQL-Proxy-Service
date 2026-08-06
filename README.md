@@ -11,6 +11,37 @@ The implementation prioritizes four goals:
 - Keep business logic independent from infrastructure libraries.
 - Minimize sensitive data exposure throughout the pipeline.
 
+## Data setup
+
+`sql/schema.sql` and `sql/seed.sql` create and populate `customers` and `orders`. All values are fabricated and chosen to demonstrate masking, classification, and policy outcomes, including `NULL` and empty-string handling and both card lengths.
+
+## Running the service
+
+Start the service:
+```bash
+docker compose up --build -d
+```
+Send a query:
+```bash
+curl -s -X POST http://localhost:8080/query \
+  -H "Content-Type: application/json" \
+  -d '{"sql":"SELECT id, name, email FROM customers ORDER BY id"}'
+ ``` 
+Rows are returned as positional arrays with PII already masked, for example:
+`["1", "Lihi Roas", "l***@example.com"]`.
+
+View the audit trail:
+```bash
+docker compose exec sql-proxy cat /var/lib/sql-proxy/audit.jsonl
+``` 
+View the system log:
+```bash
+docker compose logs sql-proxy
+``` 
+Stop the service:
+```bash
+docker compose down
+``` 
 ## Assignment coverage
 
 | Evaluation area | Implementation |
@@ -75,7 +106,7 @@ The service supports a bounded SQL subset. SQL that cannot be understood confide
 
 **Why?**
 
-The service does not implement authentication, user identity, or roles. Without a trusted identity it cannot decide whether a caller may modify data in general, so writes are refused as a class rather than authorized case by case.
+The service does not implement authentication, user identity, or roles. Without a trusted identity, it cannot safely authorize general data modifications. The policy therefore denies writes by default and allows only one narrowly restricted INSERT pattern.
 
 **Implementation**
 
@@ -144,23 +175,6 @@ A successful result is not returned if its audit record cannot be persisted.
 ### System log
 
 The system log is separate from the audit trail. It records operational events such as startup and configuration, the HTTP listening port, startup failures, and audit persistence failures. It never logs SQL, identifiers, values, or database error text.
-
-## Data setup
-
-`sql/schema.sql` and `sql/seed.sql` create and populate `customers` and `orders`. All values are fabricated and chosen to demonstrate masking, classification, and policy outcomes, including `NULL` and empty-string handling and both card lengths.
-
-## Run
-
-```bash
-docker compose up --build -d
-
-curl -s -X POST http://localhost:8080/query \
-  -H "Content-Type: application/json" \
-  -d '{"sql":"SELECT id, name, email FROM customers ORDER BY id"}'
-```
-
-Rows come back as positional arrays with PII already masked, for example
-`["1", "Lihi Roas", "l***@example.com"]`. Stop with `docker compose down -v`.
 
 ## Testing
 
